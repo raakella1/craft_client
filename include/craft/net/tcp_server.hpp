@@ -1,0 +1,71 @@
+/*********************************************************************************
+ * Modifications Copyright 2026 eBay Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *    https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed
+ * under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ * CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
+ *
+ *********************************************************************************/
+#pragma once
+
+// The CRAFT TCP server: decodes wire requests and drives a real MemCraftReplica through its srv_* local-server
+// seam (the roadmap's "reuse the model" lever), so the tested journal / index / apply / read-with-holes logic
+// serves over real TCP with no second modeled network underneath it. Unlike the client, the server is coupled
+// to the reference model -- but only in the .cpp: the replica is a pimpl (forward-declared here, included in
+// craft_tcp_server.cpp), so THIS header stays homeblocks-free (wire + connection only).
+//
+// Still one connection == one session, blocking submit-and-wait: no HELLO (P3), no auth (P6).
+
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <craft/net/conn.hpp>
+#include <craft/wire.hpp>
+
+namespace craft {
+class MemCraftReplica; // the server's state backing (pimpl; included only in craft_tcp_server.cpp)
+}
+
+namespace craft::net {
+
+// The server's per-volume geometry -- what LOGIN advertises; the replica's journal/index is built from it.
+struct server_geometry {
+    uint64_t capacity = 0;
+    uint32_t lba_size = 0;
+    uint32_t max_tx = 0;
+    std::vector< wire::member > members; // members[0] is this replica (its id + addr)
+};
+
+class craft_tcp_server {
+public:
+    explicit craft_tcp_server(server_geometry geo);
+    ~craft_tcp_server();
+    craft_tcp_server(craft_tcp_server&&) = default;
+    craft_tcp_server& operator=(craft_tcp_server&&) = default;
+
+    // Handle one connection until it closes (blocking). Run on a thread for the test.
+    void serve(craft_conn conn);
+
+private:
+    server_geometry geo_;
+    std::shared_ptr< MemCraftReplica > replica_; // the real state; driven via its srv_* local-server seam
+    uint64_t next_term_ = 0;                     // monotonic term source; a fresh LOGIN takes ++next_term_
+    uint64_t session_term_ = 0;                  // the current session's term, stamped on every IO
+    bool session_active_ = false;                // false before LOGIN / after LOGOUT -> IO is fenced
+
+    void on_login(craft_conn&, wire::message const&);
+    void on_logout(craft_conn&, wire::message const&);
+    void on_write(craft_conn&, wire::message const&);
+    void on_read(craft_conn&, wire::message const&);
+    void on_keep_alive(craft_conn&, wire::message const&);
+};
+
+} // namespace craft::net

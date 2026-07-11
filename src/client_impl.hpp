@@ -1,0 +1,84 @@
+/*********************************************************************************
+ * Modifications Copyright 2026 eBay Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *    https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed
+ * under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ * CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
+ *
+ *********************************************************************************/
+#pragma once
+
+// INTERNAL. The concrete craft_client -- the CRAFT protocol logic (dLSN assignment, quorum broadcast, read
+// routing, commit tracking). No consumer ever sees this class: drivers hold the opaque handle from
+// <craft/client.hpp> and call the free functions; a transport author calls make_client(<craft/replica.hpp>).
+// Only make_client and the free functions (all defined in client.cpp) touch it.
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <system_error>
+#include <vector>
+
+#include <sisl/fds/buffer.hpp> // sisl::sg_list
+
+#include <craft/replica.hpp> // the per-replica backend interface craft_client drives
+
+#include "dlsn_tracker.hpp"   // internal: the dLSN state machine (slot_outcome, tracker_stats, read_plan)
+#include "read_route_map.hpp" // internal: the per-member Missing / read-eligibility map
+
+namespace craft {
+
+class craft_client {
+public:
+    craft_client(std::vector< std::shared_ptr< craft_replica > > replicas, uint32_t leader = 0,
+                 uint32_t max_inflight = 128) :
+            replicas_(std::move(replicas)), leader_(leader), tracker_(max_inflight) {}
+
+    async_status login(uint64_t client_token);
+    async_result< size_t > write(uint64_t addr, uint64_t len, sisl::sg_list data);
+    async_result< size_t > read(uint64_t addr, uint64_t len, sisl::sg_list dest);
+    async_status flush();
+    async_status logout();
+    void drive_keepalives(std::size_t exclude_idx);
+
+    uint32_t lba_size() const { return lba_size_; }
+    uint64_t capacity() const { return capacity_; }
+    uint64_t term() const { return term_; }
+    int64_t commit_lsn() const { return tracker_.frontier(); }
+    int64_t read_horizon() const { return tracker_.read_horizon(); }
+    uint64_t winner_scans() const { return tracker_.winner_scans(); }
+    int64_t route_folded() const { return route_->folded(); }
+    bool route_caught_up(std::size_t idx) const { return route_->caught_up(idx); }
+    int64_t all_committed_lsn() const { return route_->all_committed(); }
+    tracker_stats dlsn_stats(std::size_t sample_limit = 16) const { return tracker_.stats(sample_limit); }
+    std::size_t replica_count() const { return replicas_.size(); }
+    uint32_t leader_index() const { return leader_; }
+
+private:
+    client_hdr make_hdr() const;
+    std::size_t quorum() const { return replicas_.size() / 2 + 1; }
+    std::optional< std::error_condition > precheck(uint64_t addr, uint64_t len) const;
+    async_result< size_t > issue_plan(std::shared_ptr< craft_replica > const& target, client_hdr hdr,
+                                      read_plan const& plan, uint64_t addr, uint64_t len, sisl::sg_list& dest);
+
+    std::vector< std::shared_ptr< craft_replica > > replicas_;
+    uint32_t leader_{0};
+    uint64_t term_{0};
+    uint32_t lba_size_{0};
+    uint64_t capacity_{0};
+
+    dlsn_tracker tracker_;
+    // shared_ptr, not a plain member: a detached when_quorum straggler's completion hook records into this map
+    // and may finish after the client is destroyed. The hook captures a copy, so a late completion writes into
+    // a still-alive (orphaned) map rather than a freed one -- the same discipline the transport uses.
+    std::shared_ptr< read_route_map > route_{std::make_shared< read_route_map >()};
+};
+
+} // namespace craft

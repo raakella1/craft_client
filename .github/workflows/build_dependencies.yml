@@ -1,0 +1,197 @@
+name: Conan Build
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: false
+        default: 'ubuntu-24.04'
+        type: string
+      branch:
+        required: true
+        type: string
+      build-type:
+        required: true
+        type: string
+      malloc-impl:
+        required: true
+        type: string
+      compiler:
+        required: false
+        type: string
+        default: 'gcc'
+      conan-channel:
+        required: false
+        type: string
+        default: 'dev'
+      tooling:
+        required: false
+        type: string
+        default: 'None'
+      testing:
+        required: false
+        type: string
+        default: 'False'
+  workflow_dispatch:
+    inputs:
+      platform:
+        required: true
+        type: choice
+        options:
+          - ubuntu-24.04
+        default: 'ubuntu-24.04'
+      branch:
+        required: true
+        type: string
+      build-type:
+        required: true
+        type: choice
+        options:
+          - Debug
+          - Release
+          - RelWithDebInfo
+      malloc-impl:
+        required: true
+        type: choice
+        options:
+          - libc
+          - tcmalloc
+          - jemalloc
+      compiler:
+        required: false
+        type: choice
+        options:
+          - gcc
+          - clang
+        default: 'gcc'
+      conan-channel:
+        required: false
+        type: string
+        default: 'dev'
+      tooling:
+        required: false
+        type: choice
+        options:
+          - 'AddressSanitize'
+          - 'ThreadSanitize'
+          - 'Coverage'
+          - 'None'
+        default: 'None'
+      testing:
+        description: 'Build and Run'
+        required: true
+        type: choice
+        options:
+          - 'True'
+          - 'False'
+        default: 'True'
+
+jobs:
+  BuildCraftClientDeps:
+    runs-on: ${{ inputs.platform }}
+    steps:
+    - name: Retrieve Code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.branch }}
+      if: ${{ inputs.testing == 'True' }}
+
+    - name: Check Code Formatting
+      run: |
+        git fetch --depth=50 origin ${{ github.base_ref }}
+        echo "Comparing HEAD against origin/${{ github.base_ref }}"
+        CHANGED_FILES=$(git diff --name-only --diff-filter=d origin/${{ github.base_ref }} | grep -E '\.(c|cpp|cc|cxx|h|hpp|hxx|ipp)$' || true)
+        if [[ -z "$CHANGED_FILES" ]]; then
+          echo "No C/C++ files modified in this PR"
+          exit 0
+        fi
+        echo "Checking formatting for PR-modified C/C++ files:"
+        echo "$CHANGED_FILES"
+        echo "$CHANGED_FILES" | xargs clang-format -style=file -i -fallback-style=none
+        if ! git diff --exit-code -- $CHANGED_FILES; then
+          echo "::error::Code formatting check failed. Run './apply-clang-format.sh' locally and commit."
+          exit 1
+        fi
+        echo "✓ All PR-modified files are properly formatted"
+      if: ${{ github.event_name == 'pull_request' && inputs.testing == 'True' }}
+
+    - name: Retrieve Recipe
+      uses: actions/checkout@v4
+      with:
+        repository: szmyd/craft_client
+        ref: ${{ inputs.branch }}
+      if: ${{ inputs.testing == 'False' }}
+
+    - name: Setup Conan
+      uses: szmyd/sisl/.github/actions/setup_conan2@dev/v14.x
+      with:
+        platform: ${{ inputs.platform }}
+        compiler: ${{ inputs.compiler }}
+      if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
+
+    - name: Load CraftClient Cache
+      id: restore-cache
+      uses: szmyd/sisl/.github/actions/load_conan2@dev/v14.x
+      with:
+        testing: ${{ inputs.testing }}
+        key_prefix: CraftClientDeps-${{ inputs.platform }}-${{ inputs.build-type }}-${{ inputs.malloc-impl }}
+
+    - name: Load Sisl Cache
+      uses: szmyd/sisl/.github/actions/load_conan2@dev/v14.x
+      with:
+        testing: 'False'
+        path: import/sisl
+        key_prefix: SislDeps14-${{ inputs.platform }}-${{ inputs.build-type }}-${{ inputs.malloc-impl }}-${{ inputs.compiler }}
+        fail_on_cache_miss: true
+      if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
+
+    - name: Retrieve Dependencies
+      uses: actions/checkout@v4
+      with:
+        repository: eBay/sisl
+        path: import/sisl
+        ref: dev/v14.x
+      if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
+
+    - name: Prepare Recipes
+      run: |
+        pushd import/sisl
+        ./prepare_v2.sh
+        conan export --user oss --channel ${{ inputs.conan-channel }} .
+        popd
+      if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
+
+
+    - name: Build Cache
+      run: |
+        conan install \
+            -o sisl/*:malloc_impl=${{ inputs.malloc-impl }} \
+            -s:h build_type=${{ inputs.build-type }} \
+            -s:h compiler.cppstd=23 \
+            -c tools.build:skip_test=True \
+            --format=json \
+            --build missing \
+            . > ~/build.json
+        conan list --graph ~/build.json --graph-binaries=build,cache --format=json > ~/pkglist.json
+      if: ${{ steps.restore-cache.outputs.cache-hit != 'true' }}
+
+    - name: Save Conan Cache
+      uses: szmyd/sisl/.github/actions/store_conan2@dev/v14.x
+      with:
+        key_prefix: CraftClientDeps-${{ inputs.platform }}-${{ inputs.build-type }}-${{ inputs.malloc-impl }}
+      if: ${{ github.event_name != 'pull_request' && steps.restore-cache.outputs.cache-hit != 'true' && inputs.tooling != 'Coverage' }}
+
+    - name: Create and Test Package
+      run: |
+        conan cache clean -s -b
+        if [[ "${{ inputs.tooling }}" == "AddressSanitize" ]]; then sanitize="address"
+        elif [[ "${{ inputs.tooling }}" == "ThreadSanitize" ]]; then sanitize="thread"
+        else sanitize="False"; fi
+        conan create \
+            -o sisl/*:malloc_impl=${{ inputs.malloc-impl }} \
+            -o craft_client/*:sanitize=${sanitize} \
+            -s:h build_type=${{ inputs.build-type }} \
+            -s:h compiler.cppstd=23 \
+            ${{ inputs.conan-channel != '' && format('--user oss --channel {0}', inputs.conan-channel) || '' }} \
+            .
+      if: ${{ inputs.testing == 'True' && inputs.tooling != 'Coverage' }}

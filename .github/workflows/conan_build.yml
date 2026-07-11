@@ -1,0 +1,41 @@
+name: CraftClient Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev/v0.x
+  pull_request:
+    branches:
+      - dev/v0.x
+
+jobs:
+  GccAddressSanitize:
+    uses: ./.github/workflows/build_commit.yml
+    with:
+      platform: "ubuntu-24.04"
+      build-type: "Debug"
+      malloc-impl: "libc"
+      compiler: "gcc"
+      conan-channel: "dev"
+      tooling: "AddressSanitize"
+
+  GccThreadSanitize:
+    uses: ./.github/workflows/build_commit.yml
+    with:
+      platform: "ubuntu-24.04"
+      build-type: "Debug"
+      malloc-impl: "libc"
+      compiler: "gcc"
+      conan-channel: "dev"
+      tooling: "ThreadSanitize"
+
+  GccRelease:
+    uses: ./.github/workflows/build_commit.yml
+    with:
+      platform: "ubuntu-24.04"
+      build-type: "Release"
+      malloc-impl: "tcmalloc"
+      compiler: "gcc"
+      conan-channel: "dev"
+      tooling: "None"
