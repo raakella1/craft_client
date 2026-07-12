@@ -58,7 +58,7 @@ read_out rd(MemCraftReplica& r, uint64_t term, int64_t H, uint64_t lba, uint64_t
     std::vector< uint8_t > dest(nblk * PAGE, 0xEE);
     auto rr = rg(r.read(chdr(term, commit), H, blk(lba), blk(nblk), one_iov(dest)));
     if (!rr.has_value()) return {false, rr.error(), {}, {}};
-    return {true, {}, std::move(*rr), std::move(dest)};
+    return {true, {}, std::move(rr->extents), std::move(dest)};
 }
 
 // Log the leader in; assert success and return {term, dLSN}.

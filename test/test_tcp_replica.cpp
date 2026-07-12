@@ -74,8 +74,9 @@ TEST(CraftTcpReplica, LoginWriteReadLogout) {
         std::vector< uint8_t > dst(PAGE, 0);
         auto r = rg(proxy.read(chdr(term), /*read_lsn=*/0, /*addr=*/0, PAGE, one_iov(dst)));
         ASSERT_TRUE(r.has_value());
-        ASSERT_EQ(r->size(), 1u);
-        EXPECT_FALSE((*r)[0].hole);
+        ASSERT_EQ(r->extents.size(), 1u);
+        EXPECT_FALSE(r->extents[0].hole);
+        EXPECT_EQ(r->lsns.commit_lsn, 0); // the reply piggybacks the replica's watermarks
         EXPECT_EQ(dst, data);
 
         auto ka = rg(proxy.keep_alive(chdr(term, /*commit=*/0)));
@@ -110,6 +111,7 @@ TEST(CraftTcpReplica, FollowerLazyHelo) {
         auto r = rg(flw.read(chdr(term), 0, 0, PAGE, one_iov(dst)));
         ASSERT_TRUE(r.has_value());
         EXPECT_EQ(dst, data);
+        EXPECT_GE(r->lsns.last_append_lsn, 0); // the follower's watermarks ride the read reply
     }
     server.stop();
 }

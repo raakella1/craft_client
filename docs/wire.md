@@ -74,6 +74,7 @@ the value alone is a direction check. The op set is far under 64, so a single by
 | `READ` | 7 | | `READ_RSP` | 8 |
 | `KEEPALIVE` | 9 | | `KEEPALIVE_RSP` | 10 |
 | `LOGOUT` | 11 | | `LOGOUT_RSP` | 12 |
+| `RESOLVE` | 13 | | `RESOLVE_RSP` | 14 |
 
 `request_id` correlates a response to its request. It is a per-connection correlator allocated per request --
 not the ublk tag (a split read issues several requests against one tag) -- and is not reused on a connection
@@ -103,9 +104,9 @@ watermarks).
 
 ## The common request header
 
-`WRITE`, `READ`, `KEEPALIVE`, and `LOGOUT` requests begin their operation header with this 16-byte block --
-CRAFT's commit, piggybacked on the IO the client is already sending (there is no standalone commit verb).
-`LOGIN` and `HELO` omit it (pre-session).
+`WRITE`, `READ`, `KEEPALIVE`, `LOGOUT`, and `RESOLVE` requests begin their operation header with this 16-byte
+block -- CRAFT's commit, piggybacked on the IO the client is already sending (there is no standalone commit
+verb). `LOGIN` and `HELO` omit it (pre-session).
 
 | offset | size | field | notes |
 |---|---|---|---|
@@ -119,11 +120,12 @@ CRAFT's commit, piggybacked on the IO the client is already sending (there is no
 Establish a session; leader-only orchestration. A follower does not fail -- it returns `term == 0` with
 `leader_hint` set, and the client retries at that replica.
 
-Request operation header (8 bytes):
+Request operation header (24 bytes):
 
 | offset | size | field | notes |
 |---|---|---|---|
-| 0 | 8 | `client_token` (u64) | ownership token from the caller |
+| 0 | 16 | `volume_id` (uuid) | which volume to establish the session on (the design's `login(client_token, vol_id)`); a multi-volume server routes by it, and it is the same id `HELO` presents |
+| 16 | 8 | `client_token` (u64) | ownership token from the caller |
 
 No request body.
 
@@ -262,6 +264,40 @@ Explicit, term-fenced session teardown. Leader-only. The leader commits an `Inte
 session on every replica; later IO from this client is fenced `STALE_TERM`.
 
 Request operation header (16 bytes): the common request header. No body. Response carries `status` only.
+
+### RESOLVE (request op = 13, response op = 14)
+
+The client-requested resolution round (the design's client-request `SyncRSCommitLSN` trigger), fired after a
+failed (sub-quorum) write instead of waiting for the watchdog / periodic cadence. The round is LEADER work,
+but the client cannot know who leads mid-session (leadership may have moved since login), so it **broadcasts**
+the request to every member -- at most one outstanding per connection, like its keep_alive drive -- and
+whichever member is the current leader runs it; a non-leader answers `NOT_LEADER` (a server may equally
+forward the request to its leader). Term-fenced. The leader resolves every unresolved slot `<= upto`: it
+fetches each from a holder (the failed write completes late), or, on quorum-lacks evidence, verdicts it Empty.
+A slot `<= upto` that had not landed **anywhere** when the leader resolved is verdicted Empty, and a replica
+**rejects** a late arrival into an Empty slot (reconciliation: Empty beats data) -- so that write's own ack
+path sees deterministic rejects and fails, per the undefined-outcome contract for un-acked IO.
+
+Request operation header (24 bytes):
+
+| offset | size | field | notes |
+|---|---|---|---|
+| 0 | 16 | common request header | `commit_lsn`, `all_committed_lsn` |
+| 16 | 8 | `upto` (i64) | resolve every unresolved slot at or below this dLSN |
+
+No request body.
+
+Response operation header (16 bytes):
+
+| offset | size | field | notes |
+|---|---|---|---|
+| 0 | 8 | `resolved_upto` (i64) | everything at or below this is now resolved set-wide |
+| 8 | 4 | `empty_count` (u32) | number of Empty-verdict dLSNs in the body |
+| 12 | 4 | reserved (0) | |
+
+Response body: `empty_count` packed `i64` dLSNs (ascending) -- the slots `<= resolved_upto` verdicted Empty,
+including verdicts from earlier rounds, so a client whose previous reply was lost still learns them. Every
+other formerly-unresolved slot `<= resolved_upto` was filled and is durable.
 
 ## Status codes
 

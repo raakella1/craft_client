@@ -64,12 +64,13 @@ craft_tcp_client connect_to(craft_cluster_server const& s, std::size_t idx) {
 TEST(CraftCluster, LoginAndRedirect) {
     auto server = make_server(3);
     auto const mem = server.members();
+    auto const vol = server.volume_id();
     ASSERT_EQ(mem.size(), 3u);
     std::size_t const leader = server.leader_index();
 
     {
         auto ldr = connect_to(server, leader);
-        auto lr = ldr.login(k_token);
+        auto lr = ldr.login(vol, k_token);
         ASSERT_TRUE(lr.has_value());
         EXPECT_EQ(lr->term, 1u);
         EXPECT_EQ(lr->dlsn, -1); // fresh cluster: reconciled tail is -1, so the first new dLSN is 0
@@ -79,10 +80,17 @@ TEST(CraftCluster, LoginAndRedirect) {
 
         std::size_t const follower = (leader + 1) % 3;
         auto flw = connect_to(server, follower);
-        auto rr = flw.login(k_token);
+        auto rr = flw.login(vol, k_token);
         ASSERT_TRUE(rr.has_value());
         EXPECT_EQ(rr->term, 0u);                    // redirect
         EXPECT_EQ(rr->leader_hint, mem[leader].id); // ...pointing at the leader
+
+        // LOGIN names the volume: a mismatched id is refused before any session-establishment runs.
+        std::array< uint8_t, 16 > wrong = vol;
+        wrong[0] ^= 0xFF;
+        auto bad = ldr.login(wrong, k_token);
+        ASSERT_TRUE(bad.has_value());
+        EXPECT_EQ(bad->term, 0u); // no session
     }
     server.stop();
 }
@@ -99,7 +107,7 @@ TEST(CraftCluster, GridWriteReadAcrossReplicas) {
         for (std::size_t i = 0; i < 3; ++i)
             cli.push_back(connect_to(server, i));
 
-        auto lr = cli[leader].login(k_token);
+        auto lr = cli[leader].login(vol, k_token);
         ASSERT_TRUE(lr.has_value());
         uint64_t const term = lr->term;
         ASSERT_EQ(term, 1u);
@@ -142,7 +150,7 @@ TEST(CraftCluster, HeloWrongTermRejected) {
 
     {
         auto ldr = connect_to(server, leader);
-        auto lr = ldr.login(k_token);
+        auto lr = ldr.login(vol, k_token);
         ASSERT_TRUE(lr.has_value());
 
         std::size_t const follower = (leader + 1) % 3;
@@ -169,7 +177,7 @@ TEST(CraftCluster, LogoutFencesSetWide) {
 
     {
         auto ldr = connect_to(server, leader);
-        auto lr = ldr.login(k_token);
+        auto lr = ldr.login(vol, k_token);
         ASSERT_TRUE(lr.has_value());
         uint64_t const term = lr->term;
 

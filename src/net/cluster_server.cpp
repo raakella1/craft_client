@@ -188,6 +188,9 @@ struct craft_cluster_server::impl {
             case wire::op::keepalive:
                 on_keep_alive(*parsed, replica, rid, conn_term, bound, out);
                 break;
+            case wire::op::resolve:
+                on_resolve(*parsed, replica, rid, conn_term, bound, out);
+                break;
             case wire::op::logout:
                 on_logout(replica, rid, conn_term, bound, out);
                 break;
@@ -204,6 +207,14 @@ struct craft_cluster_server::impl {
                   uint64_t& conn_term, bool& bound, std::vector< uint8_t >& out) {
         (void)idx;
         auto const lreq = wire::decode< wire::login_req >(req.op_header);
+        // LOGIN names the volume; this server fronts exactly one, so a mismatched id is a caller error
+        // (a multi-volume server would route by it instead).
+        if (std::memcmp(lreq.volume_id.data(), &vol_id, 16) != 0) {
+            wire::login_rsp rsp{};
+            wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::invalid_argument), rid,
+                                as_bytes(rsp), {});
+            return;
+        }
         std::lock_guard< std::mutex > g{sess_mu};
         auto const lr = group.net->run_login(replica, lreq.client_token);
         if (!lr) {
@@ -269,7 +280,13 @@ struct craft_cluster_server::impl {
             if (!req.body.empty()) bytes = std::make_shared< std::vector< uint8_t > >(req.body.begin(), req.body.end());
             client_hdr const hdr{conn_term, wr.hdr.commit_lsn, wr.hdr.all_committed_lsn};
             auto const r = replica->srv_write(hdr, wr.dlsn, wr.addr, wr.len, std::move(bytes));
-            if (!r) code = to_wire_status(r.error());
+            if (!r) {
+                code = to_wire_status(r.error());
+            } else {
+                wire::write_rsp rsp{r->commit_lsn, r->last_append_lsn}; // piggybacked with the append
+                wire::frame_message(out, wire::op::write_rsp, static_cast< uint8_t >(code), rid, as_bytes(rsp), {});
+                return;
+            }
         }
         auto const lsns = replica->srv_lsns();
         wire::write_rsp rsp{lsns.commit_lsn, lsns.last_append_lsn};
@@ -295,13 +312,15 @@ struct craft_cluster_server::impl {
             dest.iovs.push_back(iovec{dest_buf.data(), static_cast< std::size_t >(rr.len)});
             client_hdr const hdr{conn_term, rr.hdr.commit_lsn, rr.hdr.all_committed_lsn};
             auto const r = replica->srv_read(hdr, rr.read_lsn, rr.addr, rr.len, dest);
-            auto const lsns = replica->srv_lsns();
-            rsp.commit_lsn = lsns.commit_lsn;
-            rsp.last_append_lsn = lsns.last_append_lsn;
             if (!r) {
                 code = to_wire_status(r.error());
+                auto const lsns = replica->srv_lsns();
+                rsp.commit_lsn = lsns.commit_lsn;
+                rsp.last_append_lsn = lsns.last_append_lsn;
             } else {
-                auto const& layout = *r;
+                rsp.commit_lsn = r->lsns.commit_lsn; // piggybacked, snapshotted atomically with the read
+                rsp.last_append_lsn = r->lsns.last_append_lsn;
+                auto const& layout = r->extents;
                 rsp.extent_count = static_cast< uint32_t >(layout.size());
                 for (auto const& e : layout) {
                     wire::extent_desc ed{};
@@ -341,6 +360,32 @@ struct craft_cluster_server::impl {
             }
         }
         wire::frame_message(out, wire::op::keepalive_rsp, static_cast< uint8_t >(code), rid, as_bytes(rsp), {});
+    }
+
+    // RESOLVE: the client-requested resolution round, run set-wide through the group's cold path (leader-only;
+    // NOT_LEADER on a follower's port, exactly like LOGOUT).
+    void on_resolve(wire::message const& req, MemCraftReplica* replica, uint16_t rid, uint64_t conn_term, bool bound,
+                    std::vector< uint8_t >& out) {
+        auto const rq = wire::decode< wire::resolve_req >(req.op_header);
+        wire::resolve_rsp rsp{};
+        std::vector< uint8_t > body;
+        wire::status code = wire::status::ok;
+        if (!bound) {
+            code = wire::status::stale_term;
+        } else if (!group.net->is_up(replica->id())) {
+            code = wire::status::replica_down;
+        } else {
+            auto const r = group.net->run_resolution(replica, conn_term, rq.upto);
+            if (!r) {
+                code = to_wire_status(r.error());
+            } else {
+                rsp.resolved_upto = r->resolved_upto;
+                rsp.empty_count = static_cast< uint32_t >(r->empty_slots.size());
+                for (auto const d : r->empty_slots)
+                    wire::put(body, d);
+            }
+        }
+        wire::frame_message(out, wire::op::resolve_rsp, static_cast< uint8_t >(code), rid, as_bytes(rsp), body);
     }
 
     // LOGOUT: leader-only teardown of the whole session (run_logout returns NOT_LEADER on a follower).

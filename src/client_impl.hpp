@@ -39,7 +39,8 @@ class craft_client {
 public:
     craft_client(std::vector< std::shared_ptr< craft_replica > > replicas, uint32_t leader = 0,
                  uint32_t max_inflight = 128) :
-            replicas_(std::move(replicas)), leader_(leader), tracker_(max_inflight) {}
+            replicas_(std::move(replicas)), leader_(leader),
+            tracker_(std::make_shared< dlsn_tracker >(max_inflight)) {}
 
     async_status login(uint64_t client_token);
     async_result< size_t > write(uint64_t addr, uint64_t len, sisl::sg_list data);
@@ -53,13 +54,13 @@ public:
     uint64_t capacity() const { return capacity_; }
     uint32_t max_tx() const { return max_tx_; }
     uint64_t term() const { return term_; }
-    int64_t commit_lsn() const { return tracker_.frontier(); }
-    int64_t read_horizon() const { return tracker_.read_horizon(); }
-    uint64_t winner_scans() const { return tracker_.winner_scans(); }
+    int64_t commit_lsn() const { return tracker_->frontier(); }
+    int64_t read_horizon() const { return tracker_->read_horizon(); }
+    uint64_t winner_scans() const { return tracker_->winner_scans(); }
     int64_t route_folded() const { return route_->folded(); }
     bool route_caught_up(std::size_t idx) const { return route_->caught_up(idx); }
     int64_t all_committed_lsn() const { return route_->all_committed(); }
-    tracker_stats dlsn_stats(std::size_t sample_limit = 16) const { return tracker_.stats(sample_limit); }
+    tracker_stats dlsn_stats(std::size_t sample_limit = 16) const { return tracker_->stats(sample_limit); }
     std::size_t replica_count() const { return replicas_.size(); }
     uint32_t leader_index() const { return leader_; }
 
@@ -67,8 +68,13 @@ private:
     client_hdr make_hdr() const;
     std::size_t quorum() const { return replicas_.size() / 2 + 1; }
     std::optional< std::error_condition > precheck(uint64_t addr, uint64_t len) const;
-    async_result< size_t > issue_plan(std::shared_ptr< craft_replica > const& target, client_hdr hdr,
-                                      read_plan const& plan, uint64_t addr, uint64_t len, sisl::sg_list& dest);
+    async_result< lsn_pair > issue_plan(std::shared_ptr< craft_replica > const& target, client_hdr hdr,
+                                        read_plan const& plan, uint64_t addr, uint64_t len, sisl::sg_list& dest);
+    // Fire the client-requested resolution round for failed slot `upto`: record the want, then BROADCAST a
+    // detached request to every peer without one outstanding (per-peer single-flight, the keep_alive
+    // collapse) -- the client cannot know who leads mid-session, so whichever member is the leader resolves.
+    // Each leg captures the tracker's and router's shared_ptrs, never `this`.
+    void request_resolution_round(int64_t upto);
 
     std::vector< std::shared_ptr< craft_replica > > replicas_;
     uint32_t leader_{0};
@@ -77,9 +83,11 @@ private:
     uint64_t capacity_{0};
     uint32_t max_tx_{0};
 
-    dlsn_tracker tracker_;
-    // shared_ptr, not a plain member: a detached when_quorum straggler's completion hook records into this map
-    // and may finish after the client is destroyed. The hook captures a copy, so a late completion writes into
+    // shared_ptr like route_: the detached resolution-round runner retires slots into the tracker and may
+    // outlive the client, so it holds this map's/tracker's lifetime rather than referencing `this`.
+    std::shared_ptr< dlsn_tracker > tracker_;
+    // shared_ptr, not a plain member: a detached when_quorum straggler's completion leg records into this map
+    // and may finish after the client is destroyed. The leg captures a copy, so a late completion writes into
     // a still-alive (orphaned) map rather than a freed one -- the same discipline the transport uses.
     std::shared_ptr< read_route_map > route_{std::make_shared< read_route_map >()};
 };

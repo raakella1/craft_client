@@ -69,6 +69,13 @@ struct read_reply {
     std::vector< wire::extent_desc > extents;
 };
 
+// A RESOLVE reply: everything <= resolved_upto is resolved on the set; `empty_slots` are the Empty verdicts.
+struct resolve_reply {
+    wire::status status = wire::status::ok;
+    int64_t resolved_upto = -1;
+    std::vector< int64_t > empty_slots;
+};
+
 class craft_tcp_client {
 public:
     craft_tcp_client() = default;
@@ -78,7 +85,9 @@ public:
     static std::expected< craft_tcp_client, net_error > connect(std::string const& host, uint16_t port);
 
     // ── session ──
-    std::expected< login_result, net_error > login(uint64_t client_token);
+    // LOGIN names the volume (the design's login(client_token, vol_id)): a multi-volume server routes the
+    // session-establishment by it; HELO presents the same id to bind follow-on connections.
+    std::expected< login_result, net_error > login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token);
     // Bind THIS connection to an already-established session (established by LOGIN on the leader). Carries the
     // volume id + client token + the session term the client learned from login. Status only.
     std::expected< wire::status, net_error > helo(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token,
@@ -106,6 +115,11 @@ public:
     // Advance the frontier toward `commit_lsn` and keep the session alive; returns {commit_lsn,
     // last_append_lsn}. The timer-less liveness drive's carrier, and CRAFT's only commit verb.
     std::expected< lsn_reply, net_error > keep_alive(int64_t commit_lsn = -1, int64_t all_committed_lsn = -1);
+
+    // Client-requested resolution round: ask the leader to resolve every unresolved slot <= `upto` now
+    // (fill from a holder or verdict Empty). Leader-only; the reply lists the Empty verdicts.
+    std::expected< resolve_reply, net_error > resolve(int64_t upto, int64_t commit_lsn = -1,
+                                                      int64_t all_committed_lsn = -1);
 
     // Bound the wait on every reply. 0 (default) blocks forever. On a timeout an op returns
     // net_error::timed_out, and the connection is left needing a reset (the proxy above reconnects).

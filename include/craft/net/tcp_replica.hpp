@@ -76,10 +76,14 @@ public:
     // ── craft_replica: client-facing ──
     async_result< LoginResult > login(uint64_t client_token) override;
     async_status logout(client_hdr hdr) override;
-    async_status write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data) override;
-    async_result< std::vector< io_extent > > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                  sisl::sg_list dest) override;
+    async_result< lsn_pair > write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                   sisl::sg_list data) override;
+    async_result< read_result > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+                                     sisl::sg_list dest) override;
     async_result< lsn_pair > keep_alive(client_hdr hdr) override;
+    // The client-requested resolution round (rare; admin-shaped): runs on the blocking worker path like
+    // login/logout, never on the ring.
+    async_result< resolution_result > request_resolution(client_hdr hdr, int64_t upto) override;
 
     // Prime the ON-RING data path: store the caller's ring. Just a pointer -- raw fds, no IOSQE_FIXED_FILE, so the
     // data connection (craft_async_conn) is opened lazily on it at the first write/read/keep_alive and reconnected

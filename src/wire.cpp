@@ -18,7 +18,7 @@
 namespace craft::wire {
 
 std::optional< std::size_t > op_hdr_size(uint8_t op_code) noexcept {
-    // Indexed by op code 1..12. 0 for a status-only response (helo_rsp, logout_rsp); index 0 is unused.
+    // Indexed by op code 1..14. 0 for a status-only response (helo_rsp, logout_rsp); index 0 is unused.
     static constexpr std::size_t k[] = {
         0,                     // 0  unused
         sizeof(login_req),     // 1  login
@@ -33,17 +33,20 @@ std::optional< std::size_t > op_hdr_size(uint8_t op_code) noexcept {
         sizeof(keepalive_rsp), // 10 keepalive_rsp
         sizeof(logout_req),    // 11 logout
         0,                     // 12 logout_rsp (status only)
+        sizeof(resolve_req),   // 13 resolve
+        sizeof(resolve_rsp),   // 14 resolve_rsp
     };
-    if (op_code < 1 || op_code > 12) return std::nullopt;
+    if (op_code < 1 || op_code > 14) return std::nullopt;
     return k[op_code];
 }
 
-bool is_response(uint8_t op_code) noexcept { return op_code >= 1 && op_code <= 12 && (op_code % 2 == 0); }
+bool is_response(uint8_t op_code) noexcept { return op_code >= 1 && op_code <= 14 && (op_code % 2 == 0); }
 
 bool op_allows_body(uint8_t op_code) noexcept {
-    return op_code == static_cast< uint8_t >(op::write) ||  // data
-        op_code == static_cast< uint8_t >(op::login_rsp) || // member list
-        op_code == static_cast< uint8_t >(op::read_rsp);    // extents + data
+    return op_code == static_cast< uint8_t >(op::write) ||   // data
+        op_code == static_cast< uint8_t >(op::login_rsp) ||  // member list
+        op_code == static_cast< uint8_t >(op::read_rsp) ||   // extents + data
+        op_code == static_cast< uint8_t >(op::resolve_rsp);  // Empty-verdict dLSN list
 }
 
 namespace {
@@ -140,6 +143,14 @@ std::optional< std::vector< member > > decode_members(std::span< uint8_t const >
         off += alen;
         out.push_back(std::move(m));
     }
+    return out;
+}
+
+std::optional< std::vector< int64_t > > decode_lsns(std::span< uint8_t const > body, uint32_t count) {
+    std::size_t const need = static_cast< std::size_t >(count) * sizeof(int64_t);
+    if (need > body.size()) return std::nullopt;
+    std::vector< int64_t > out(count);
+    if (count) std::memcpy(out.data(), body.data(), need);
     return out;
 }
 

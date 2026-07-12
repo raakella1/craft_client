@@ -44,8 +44,9 @@ std::expected< craft_tcp_client, net_error > craft_tcp_client::connect(std::stri
     return cli;
 }
 
-std::expected< login_result, net_error > craft_tcp_client::login(uint64_t client_token) {
-    wire::login_req req{client_token};
+std::expected< login_result, net_error > craft_tcp_client::login(std::array< uint8_t, 16 > const& volume_id,
+                                                                 uint64_t client_token) {
+    wire::login_req req{volume_id, client_token};
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::login, 0, next_rid_++, as_bytes(req), {});
     if (!conn_.send_all(out)) return std::unexpected(net_error::send);
@@ -175,6 +176,28 @@ std::expected< lsn_reply, net_error > craft_tcp_client::keep_alive(int64_t commi
 
     auto const ka = wire::decode< wire::keepalive_rsp >(parsed->op_header);
     return lsn_reply{static_cast< wire::status >(parsed->hdr.status), ka.commit_lsn, ka.last_append_lsn};
+}
+
+std::expected< resolve_reply, net_error > craft_tcp_client::resolve(int64_t upto, int64_t commit_lsn,
+                                                                    int64_t all_committed_lsn) {
+    wire::resolve_req req{{commit_lsn, all_committed_lsn}, upto};
+    std::vector< uint8_t > out;
+    wire::frame_message(out, wire::op::resolve, 0, next_rid_++, as_bytes(req), {});
+    if (!conn_.send_all(out)) return std::unexpected(net_error::send);
+
+    auto msg = conn_.recv_message(k_max_tx, op_timeout_);
+    if (!msg) return std::unexpected(msg.error());
+    auto parsed = wire::parse_message(*msg, k_max_tx);
+    if (!parsed || parsed->hdr.op != static_cast< uint8_t >(wire::op::resolve_rsp))
+        return std::unexpected(net_error::malformed);
+
+    auto const rr = wire::decode< wire::resolve_rsp >(parsed->op_header);
+    resolve_reply reply{static_cast< wire::status >(parsed->hdr.status), rr.resolved_upto, {}};
+    if (reply.status != wire::status::ok) return reply; // no body on a non-ok reply
+    auto empties = wire::decode_lsns(parsed->body, rr.empty_count);
+    if (!empties) return std::unexpected(net_error::malformed); // truncated verdict list
+    reply.empty_slots = std::move(*empties);
+    return reply;
 }
 
 } // namespace craft::net

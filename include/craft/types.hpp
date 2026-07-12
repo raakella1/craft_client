@@ -116,6 +116,25 @@ struct io_extent {
     bool hole{false};
 };
 
+// A read reply: the sparse layout of the filled dest buffer PLUS the replica's piggybacked watermarks.
+// Every CRAFT IO response carries {commit_lsn, last_append_lsn} (the wire's write_rsp / read_rsp /
+// keepalive_rsp), so any round-trip refreshes the client's model of that member -- the read reply must
+// surface them, not drop them at the transport.
+struct read_result {
+    std::vector< io_extent > extents; // ascending by addr; data vs holes
+    lsn_pair lsns{};                  // the serving replica's {commit_lsn, last_append_lsn} after the read
+};
+
+// Returned by craft_replica::request_resolution(): the leader's answer to the client-requested resolution
+// round (the design's client-request SyncRSCommitLSN trigger). On success EVERY slot <= resolved_upto is
+// resolved: the ones in `empty_slots` were declared Empty (proven never quorum-durable; permanent no-op
+// holes), every other formerly-unresolved slot was filled from a holder and is durable (the failed write
+// simply completed late).
+struct resolution_result {
+    int64_t resolved_upto{-1};
+    std::vector< int64_t > empty_slots; // ascending dLSNs <= resolved_upto verdicted Empty
+};
+
 // CRAFT-specific failures, registered as a std::error_condition enum so they ride result<T> while staying
 // branchable: if (r.error() == craft_error::STALE_TERM) { ... }. Anything with a standard equivalent is
 // still returned via std::make_error_condition(std::errc::*).

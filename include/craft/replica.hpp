@@ -83,20 +83,36 @@ public:
     // empty (size 0) => a zero write (WRITE_ZEROES / unmap; `len` is the range); non-empty => a data
     // write of exactly `len` bytes (scatter-gather, any iovec count). Does NOT apply to the index; the
     // frontier is advanced by hdr.commit_lsn (piggybacked commit). craft_error::STALE_TERM if
-    // hdr.term != the session term.
-    virtual async_status write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data) = 0;
+    // hdr.term != the session term. Returns the replica's {commit_lsn, last_append_lsn} after the append --
+    // every IO response piggybacks the watermarks, so any round-trip refreshes the client's view.
+    virtual async_result< lsn_pair > write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                           sisl::sg_list data) = 0;
 
     // Latest version <= read_lsn (horizon H) for [addr, addr+len) (BYTE offset/length, aligned). Fills the
     // caller-owned `dest` buffer in place (scatter-gather; data sub-ranges get bytes, holes get zeros) and
-    // returns the sparse layout (data vs holes). Advances the frontier to hdr.commit_lsn. STALE_TERM on
-    // term mismatch.
-    virtual async_result< std::vector< io_extent > > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                          sisl::sg_list dest) = 0;
+    // returns the sparse layout (data vs holes) plus the piggybacked {commit_lsn, last_append_lsn}.
+    // Advances the frontier to hdr.commit_lsn. STALE_TERM on term mismatch.
+    virtual async_result< read_result > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+                                             sisl::sg_list dest) = 0;
 
     // Advance the frontier toward hdr.commit_lsn + reset the client-liveness watchdog -- which is WHY
     // it is term-fenced: a stale client must not be able to keep the session alive. Returns the
     // achieved {commit_lsn, last_append_lsn}. No standalone commit verb; keep_alive is its carrier.
     virtual async_result< lsn_pair > keep_alive(client_hdr hdr) = 0;
+
+    // The client-requested resolution round (the design's client-request SyncRSCommitLSN trigger): resolve
+    // every unresolved slot <= `upto` NOW -- fetch each from a holder, or, on quorum-lacks evidence, declare
+    // it Empty -- instead of waiting for the watchdog / periodic cadence. The round itself is LEADER work,
+    // but the client cannot know who leads mid-session (it learned the leader at login; leadership may have
+    // moved), so it BROADCASTS this to every member, at most one outstanding per peer: whichever member is
+    // the current leader runs the round, and a non-leader answers craft_error::NOT_LEADER (a real replica may
+    // instead forward to its leader -- either is a valid implementation of this verb). The client fires it
+    // after a failed (sub-quorum) write and retires the covered slots off the returned verdicts. NOTE the
+    // watermark semantics: a write <= `upto` that had not landed ANYWHERE when the leader resolved is
+    // verdicted Empty, and a replica rejects a late arrival into an Empty slot -- so that write's own ack
+    // path sees deterministic rejects and fails, the undefined-outcome contract for un-acked IO. Term-fenced
+    // (STALE_TERM).
+    virtual async_result< resolution_result > request_resolution(client_hdr hdr, int64_t upto) = 0;
 
     // Bind this backend's data path to a host io_uring `ring` (a ublk queue's, or a test's) for on-ring async
     // completion. Called once per ring, OFF the IO path (never concurrently with an in-flight op). Default

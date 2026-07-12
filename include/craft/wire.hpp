@@ -66,6 +66,8 @@ enum class op : uint8_t {
     keepalive_rsp = 10,
     logout = 11,
     logout_rsp = 12,
+    resolve = 13, // client-requested resolution round (leader-only)
+    resolve_rsp = 14,
 };
 
 // Response `status` byte; 1-6 mirror craft_error (craft_types.hpp).
@@ -98,7 +100,10 @@ struct req_hdr {
     int64_t all_committed_lsn;
 };
 
+// LOGIN names the volume: a multi-volume server routes the session-establishment by it (the design's
+// login(client_token, vol_id)). Same 16-byte id HELO presents to bind follow-on connections.
 struct login_req {
+    std::array< uint8_t, 16 > volume_id;
     uint64_t client_token;
 };
 struct login_rsp {
@@ -177,11 +182,25 @@ struct logout_req {
 };
 // logout_rsp: status only.
 
+// Client-requested resolution round: resolve every unresolved slot <= `upto` (leader-only; the design's
+// client-request SyncRSCommitLSN trigger, fired after a failed write).
+struct resolve_req {
+    req_hdr hdr;
+    int64_t upto;
+};
+// resolve_rsp body: empty_count x int64_t -- the slots <= resolved_upto verdicted Empty. Everything else
+// <= resolved_upto that was unresolved is now durable (filled from a holder).
+struct resolve_rsp {
+    int64_t resolved_upto;
+    uint32_t empty_count;
+    uint32_t reserved;
+};
+
 #pragma pack(pop)
 
 static_assert(sizeof(msg_hdr) == 8);
 static_assert(sizeof(req_hdr) == 16);
-static_assert(sizeof(login_req) == 8);
+static_assert(sizeof(login_req) == 24);
 static_assert(sizeof(login_rsp) == 56);
 static_assert(sizeof(helo_req) == 32);
 static_assert(sizeof(write_req) == 40);
@@ -192,6 +211,8 @@ static_assert(sizeof(extent_desc) == 24);
 static_assert(sizeof(keepalive_req) == 16);
 static_assert(sizeof(keepalive_rsp) == 16);
 static_assert(sizeof(logout_req) == 16);
+static_assert(sizeof(resolve_req) == 24);
+static_assert(sizeof(resolve_rsp) == 16);
 
 // The fixed operation-header size for an op code (0 for a status-only response). nullopt = unknown op, which
 // is unframeable -- the caller resets the connection.
@@ -274,6 +295,9 @@ std::optional< std::vector< member > > decode_members(std::span< uint8_t const >
 // Decode `count` fixed-size extent descriptors from the front of a read_rsp body (the remaining bytes are the
 // concatenated data for the non-hole extents). nullopt if the body is too short for `count` descriptors.
 std::optional< std::vector< extent_desc > > decode_extents(std::span< uint8_t const > body, uint32_t count);
+
+// Decode `count` packed int64 dLSNs from a body (resolve_rsp's Empty-verdict list). nullopt if truncated.
+std::optional< std::vector< int64_t > > decode_lsns(std::span< uint8_t const > body, uint32_t count);
 
 // A plan for placing a read_rsp's packed body data into the caller's dest buffer. `data` is one {dest_offset,
 // len} per non-hole extent in wire order -- the recv scatters the contiguous body into these; `holes` are the

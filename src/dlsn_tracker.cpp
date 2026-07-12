@@ -60,6 +60,9 @@ void dlsn_tracker::reset_at(int64_t login_dlsn, uint32_t lba_size) {
     last_trunc_.store(login_dlsn, std::memory_order_relaxed);
     frontier_.store(login_dlsn, std::memory_order_release);
     highest_acked_.store(login_dlsn, std::memory_order_release);
+    // A want must not leak across sessions: slot numbers are REUSED above the login watermark, so a stale
+    // want could void the new session's in-flight slots.
+    resolve_want_.store(-1, std::memory_order_relaxed);
     // StreamTracker(name, start_idx) bases its window at start_idx + 1, i.e. the first dLSN we will issue.
     tracker_.emplace("craft_dlsn", login_dlsn);
 }
@@ -74,11 +77,22 @@ void dlsn_tracker::resolve(int64_t dlsn, slot_outcome oc) {
     bool const resolved = is_resolved(oc);
 
     // On `true`, update() sets the completion bit -- a release store, which publishes this outcome to any
-    // concurrent scanner that acquires that bit.
-    tracker_->update(dlsn, [oc, resolved](dlsn_slot& s) {
+    // concurrent scanner that acquires that bit. A slot that is ALREADY resolved is left alone (never
+    // downgraded): a resolution round may retire a slot off the leader's verdict while that slot's own
+    // broadcast legs are still completing, and the legs' late verdict must not overwrite the round's.
+    bool applied = false;
+    tracker_->update(dlsn, [oc, resolved, &applied](dlsn_slot& s) {
+        auto const cur =
+            static_cast< slot_outcome >(std::atomic_ref< uint8_t >(s.outcome).load(std::memory_order_relaxed));
+        if (is_resolved(cur)) return true; // keep the completed bit set; drop this (stale) outcome
         std::atomic_ref< uint8_t >(s.outcome).store(static_cast< uint8_t >(oc), std::memory_order_relaxed);
+        applied = true;
         return resolved;
     });
+    if (!applied) {
+        gate_.signal(); // cheap; a waiter racing the earlier resolve re-tests against published state
+        return;
+    }
 
     if (oc == slot_outcome::acked) {
         // A CAS (not a store), so every publication of Ha joins one release sequence: a reader that
@@ -115,6 +129,28 @@ void dlsn_tracker::advance_frontier() {
             return;
         }
     }
+}
+
+// ── the resolution-round want watermark ──
+
+void dlsn_tracker::note_resolution_want(int64_t upto) {
+    int64_t w = resolve_want_.load(std::memory_order_relaxed);
+    while (upto > w && !resolve_want_.compare_exchange_weak(w, upto, std::memory_order_release,
+                                                            std::memory_order_relaxed)) {}
+}
+
+std::optional< int64_t > dlsn_tracker::resolution_want() const {
+    int64_t const w = resolve_want_.load(std::memory_order_acquire);
+    if (w < 0) return std::nullopt;
+    return w;
+}
+
+void dlsn_tracker::clear_resolution_want(int64_t resolved_upto) {
+    // Consume only what the round covered: a HIGHER want that landed mid-round survives the clear and the
+    // leader's leg loops for it.
+    int64_t w = resolve_want_.load(std::memory_order_relaxed);
+    while (w >= 0 && w <= resolved_upto &&
+           !resolve_want_.compare_exchange_weak(w, -1, std::memory_order_acq_rel, std::memory_order_relaxed)) {}
 }
 
 tracker_stats dlsn_tracker::stats(std::size_t sample_limit) const {

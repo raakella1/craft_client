@@ -32,7 +32,7 @@ client_hdr craft_client::make_hdr() const {
     // Every IO piggybacks the commit frontier (CRAFT has no standalone commit verb) and the set-wide reclaim
     // floor -- min commit_lsn across members, which the broadcast keep_alive maintains (the login baseline
     // until the first sweep). A replica reclaims journal below min(all_committed_lsn, its own apply frontier).
-    return client_hdr{term_, tracker_.frontier(), route_->all_committed()};
+    return client_hdr{term_, tracker_->frontier(), route_->all_committed()};
 }
 
 // Fail fast rather than burn a dLSN on an IO the replicas will reject anyway. They enforce alignment too.
@@ -68,7 +68,7 @@ async_status craft_client::login(uint64_t client_token) {
         // (extent table on top of the data) lives in the PARSE bound instead (parse_message allows body_len a
         // margin over max_tx), so the payload stays the clean number.
         max_tx_ = lr->max_tx;
-        tracker_.reset_at(lr->dLSN, lr->lba_size);
+        tracker_->reset_at(lr->dLSN, lr->lba_size);
         // Seed the router for this session: everything <= the login dLSN is universally held (the login
         // SyncRSCommitLSN barrier). Install a FRESH map rather than resetting in place: a detached straggler
         // from a prior session still holds a shared_ptr to the old map (the when_quorum hook captured a copy)
@@ -81,13 +81,30 @@ async_status craft_client::login(uint64_t client_token) {
     co_return std::unexpected(last_err ? last_err : make_error_condition(craft_error::NOT_LEADER));
 }
 
+// One broadcast leg: run the write on `h`, then feed the completion -- and, on an ack, the reply's
+// piggybacked commit_lsn -- to the router BEFORE the quorum latch can fire (a leg's body runs before
+// when_quorum counts it, the same ordering the completion hook used to give record_completion). Feeding
+// EVERY leg matters: the fold needs to know when all legs finished before it decides a member missed the
+// write. Exceptions are swallowed as a non-ack so a throwing leg still reports its completion.
+static async_result< lsn_pair > write_leg(std::shared_ptr< craft_replica > h, std::shared_ptr< read_route_map > route,
+                                          client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                          sisl::sg_list data, std::size_t idx) {
+    result< lsn_pair > r = std::unexpected(make_error_condition(craft_error::REPLICA_DOWN));
+    try {
+        r = co_await h->write(hdr, dlsn, addr, len, std::move(data));
+    } catch (...) {}
+    route->record_completion(dlsn, idx, r.has_value());
+    if (r.has_value()) route->advance_synced(idx, r->commit_lsn); // any round-trip refreshes the watermark
+    co_return r;
+}
+
 async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg_list data) {
     if (auto const e = precheck(addr, len)) co_return std::unexpected(*e);
 
     // Reserve the dLSN and record its range BEFORE the broadcast: any replica that can hold this slot implies a
     // concurrent read's scan can already see it, which is what makes the horizon safe. The router slot is
     // created here too, single-writer, so every completion below only updates it.
-    int64_t const dlsn = tracker_.reserve(addr, len);
+    int64_t const dlsn = tracker_->reserve(addr, len);
     route_->create(dlsn, addr, len);
     client_hdr const hdr = make_hdr();
 
@@ -95,34 +112,27 @@ async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg
     // Stragglers keep running detached, so each replica op must have consumed `data` by its first suspension
     // point (see when_quorum) -- the caller may recycle the buffer the moment we return.
     std::size_t acks = 0;
-    std::shared_ptr< std::vector< status > > results;
+    std::shared_ptr< std::vector< result< lsn_pair > > > results;
 
     if (replicas_.size() == 1) {
-        auto r = co_await replicas_[0]->write(hdr, dlsn, addr, len, std::move(data));
+        auto r = co_await write_leg(replicas_[0], route_, hdr, dlsn, addr, len, std::move(data), 0);
         acks = r.has_value() ? 1 : 0;
-        route_->record_completion(dlsn, 0, /*acked=*/r.has_value());
-        results = std::make_shared< std::vector< status > >(1, std::move(r));
+        results = std::make_shared< std::vector< result< lsn_pair > > >(1, std::move(r));
     } else {
-        // Each task gets its own sg_list descriptor copy; all point at the same caller-owned source buffer.
-        std::vector< async_status > futs;
+        // Each leg gets its own sg_list descriptor copy; all point at the same caller-owned source buffer.
+        std::vector< async_result< lsn_pair > > futs;
         futs.reserve(replicas_.size());
-        for (auto& h : replicas_) {
-            futs.push_back(h->write(hdr, dlsn, addr, len, data));
+        for (std::size_t i = 0; i < replicas_.size(); ++i) {
+            futs.push_back(write_leg(replicas_[i], route_, hdr, dlsn, addr, len, data, i));
         }
-        // Feed EVERY replica's completion to the router, not just acks: the fold needs to know when all children
-        // have finished before it decides a member missed the write (else a healthy straggler that acks just
-        // after quorum is wrongly stuck behind). The quorum members are recorded before we resume (the hook
-        // fires before the latch), so their holds are visible before resolve() advances Ha.
-        auto q = co_await sisl::async::when_quorum(
-            std::move(futs), quorum(),
-            [route = route_, dlsn](std::size_t i, bool acked) { route->record_completion(dlsn, i, acked); });
+        auto q = co_await sisl::async::when_quorum(std::move(futs), quorum());
         acks = q.acks;
         results = std::move(q.results);
     }
 
     if (acks >= quorum()) {
         // Quorum-durable. Do NOT read `results`: children we stopped waiting for may still be writing it.
-        tracker_.resolve(dlsn, slot_outcome::acked);
+        tracker_->resolve(dlsn, slot_outcome::acked);
         co_return len;
     }
 
@@ -145,27 +155,74 @@ async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg
         if (deterministic_reject(r.error())) ++refused;
     }
 
-    tracker_.resolve(dlsn, (refused == replicas_.size()) ? slot_outcome::empty : slot_outcome::failed);
+    bool const provably_empty = (refused == replicas_.size());
+    tracker_->resolve(dlsn, provably_empty ? slot_outcome::empty : slot_outcome::failed);
+    // A failed (sub-quorum, not provably-absent) slot pins the frontier until the leader fills or Empties it:
+    // request the resolution round NOW (the design's client-request SyncRSCommitLSN trigger) instead of
+    // waiting for a watchdog / periodic cadence that the client cannot see.
+    if (!provably_empty) request_resolution_round(dlsn);
     co_return std::unexpected(last_err ? last_err : make_error_condition(craft_error::NO_QUORUM));
 }
 
-// Issue a whole read plan to one target, filling `dest` in place. Factored out of read() so the router can
-// retry it against the next eligible member on a transport failure. `dest` is copied per attempt (descriptors
-// only; both point at the caller's buffer), so a failover re-fills the same buffer.
-async_result< size_t > craft_client::issue_plan(std::shared_ptr< craft_replica > const& target, client_hdr hdr,
-                                                read_plan const& plan, uint64_t addr, uint64_t len,
-                                                sisl::sg_list& dest) {
+// One detached resolution leg to member `idx` -- fire-and-forget, like fire_keepalive: it captures the
+// tracker/route shared_ptrs and the backend by value, never the client. It drains the want watermark: a burst
+// of failed writes collapses into this one outstanding request per peer, and a want that lands while the
+// leader is resolving is picked up by the next loop pass. A member that is NOT the leader answers NOT_LEADER
+// and the leg simply ends, LEAVING the want set -- only the leader's leg (whichever member that currently is)
+// resolves and consumes it. On success the covered slots are retired off the verdicts: Empty ones as Empty,
+// filled ones as acked with the router told first (note_filled) so reads route only to certain holders until
+// the commit_lsn certificates catch up. A leg that errors (member down, deposed term) also just ends: the
+// slot stays pinned and the next failed write re-fires the legs.
+static async_status fire_resolution(std::shared_ptr< craft_replica > h, std::size_t idx, uint64_t term,
+                                    std::shared_ptr< dlsn_tracker > tracker, std::shared_ptr< read_route_map > route) {
+    for (;;) {
+        while (auto const want = tracker->resolution_want()) {
+            client_hdr const hdr{term, tracker->frontier(), route->all_committed()};
+            auto r = co_await h->request_resolution(hdr, *want);
+            if (!r.has_value()) { // NOT_LEADER / down / stale: this peer cannot resolve; leave the want alone
+                route->end_resolution(idx);
+                co_return ok();
+            }
+            tracker->retire_upto(r->resolved_upto, r->empty_slots, [&](int64_t d) { route->note_filled(d, idx); });
+            tracker->clear_resolution_want(r->resolved_upto);
+        }
+        route->end_resolution(idx);
+        // Close the note-then-begin race: a want recorded between our last peek and the flag release would
+        // strand until the next failure. Reclaim this peer's flag only if a want is actually pending.
+        if (!tracker->resolution_want() || !route->try_begin_resolution(idx)) co_return ok();
+    }
+}
+
+void craft_client::request_resolution_round(int64_t upto) {
+    tracker_->note_resolution_want(upto);
+    // BROADCAST, not a leader walk: the client learned the leader at login and leadership may have moved
+    // since -- mid-session it cannot know who leads. Every member gets the request, at most one outstanding
+    // per peer (the keep_alive collapse); whichever member IS the leader runs the round, the rest answer
+    // NOT_LEADER (a real replica may instead forward to its leader -- either way the client need not know).
+    for (std::size_t m = 0; m < replicas_.size(); ++m) {
+        if (route_->try_begin_resolution(m))
+            sisl::async::detach(fire_resolution(replicas_[m], m, term_, tracker_, route_));
+    }
+}
+
+// Issue a whole read plan to one target, filling `dest` in place; resolves to the target's piggybacked
+// watermarks (the highest across a split's segments -- same member, monotonic). Factored out of read() so the
+// router can retry it against the next eligible member on a transport failure. `dest` is copied per attempt
+// (descriptors only; both point at the caller's buffer), so a failover re-fills the same buffer.
+async_result< lsn_pair > craft_client::issue_plan(std::shared_ptr< craft_replica > const& target, client_hdr hdr,
+                                                  read_plan const& plan, uint64_t addr, uint64_t len,
+                                                  sisl::sg_list& dest) {
     if (plan.size() == 1) {
         sisl::sg_list whole = dest;
-        auto layout = co_await target->read(hdr, plan.front().H, addr, len, std::move(whole));
-        if (!layout.has_value()) co_return std::unexpected(layout.error());
-        co_return len;
+        auto r = co_await target->read(hdr, plan.front().H, addr, len, std::move(whole));
+        if (!r.has_value()) co_return std::unexpected(r.error());
+        co_return r->lsns;
     }
 
     // Split read: sg_iterator walks `dest` once, in order, carving one descriptor per segment. Each is passed
     // by value into the callee's coroutine frame, so no descriptor of ours outlives this loop.
     sisl::sg_iterator slicer{dest.iovs};
-    std::vector< async_result< std::vector< io_extent > > > futs;
+    std::vector< async_result< read_result > > futs;
     futs.reserve(plan.size());
     for (auto const& seg : plan) {
         sisl::sg_list sub;
@@ -173,16 +230,19 @@ async_result< size_t > craft_client::issue_plan(std::shared_ptr< craft_replica >
         sub.iovs = slicer.next_iovs(static_cast< uint32_t >(seg.len));
         futs.push_back(target->read(hdr, seg.H, seg.addr, seg.len, std::move(sub)));
     }
+    lsn_pair lsns{-1, -1};
     for (auto const& r : co_await sisl::async::when_all(std::move(futs))) {
         if (!r.has_value()) co_return std::unexpected(r.error());
+        lsns.commit_lsn = std::max(lsns.commit_lsn, r->lsns.commit_lsn);
+        lsns.last_append_lsn = std::max(lsns.last_append_lsn, r->lsns.last_append_lsn);
     }
-    co_return len;
+    co_return lsns;
 }
 
 async_result< size_t > craft_client::read(uint64_t addr, uint64_t len, sisl::sg_list dest) {
     if (auto const e = precheck(addr, len)) co_return std::unexpected(*e);
 
-    auto const plan = co_await tracker_.plan_read(addr, len);
+    auto const plan = co_await tracker_->plan_read(addr, len);
     if (!plan.has_value()) co_return std::unexpected(plan.error());
 
     client_hdr const hdr = make_hdr();
@@ -190,7 +250,7 @@ async_result< size_t > craft_client::read(uint64_t addr, uint64_t len, sisl::sg_
     // Route to a member that actually holds the winner for this range, not blindly to the leader. Fold the
     // router up to the current frontier, then take the highest horizon across segments: a member eligible at
     // Hmax over the whole range is eligible for every segment at its own (<=) horizon.
-    int64_t const F = tracker_.frontier();
+    int64_t const F = tracker_->frontier();
     route_->fold_to(F);
     int64_t Hmax = F;
     for (auto const& seg : *plan)
@@ -215,10 +275,12 @@ async_result< size_t > craft_client::read(uint64_t addr, uint64_t len, sisl::sg_
 
         auto r = co_await issue_plan(replicas_[idx], hdr, *plan, addr, len, dest);
         if (r.has_value()) {
-            // Timer-less keep_alive drive: top up every leg this read did NOT touch (one outstanding per leg),
-            // so their sessions do not expire and their commit/append refresh. The leg we served is fresh.
+            // The reply piggybacked the serving member's watermarks: feed them to the router (this is what
+            // makes "the leg we served is fresh" literally true), then top up every leg this read did NOT
+            // touch with a keep_alive (one outstanding per leg) so their sessions and watermarks refresh too.
+            route_->advance_synced(idx, r->commit_lsn);
             drive_keepalives(idx);
-            co_return *r;
+            co_return len;
         }
 
         last_err = r.error();

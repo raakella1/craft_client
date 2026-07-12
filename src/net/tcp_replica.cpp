@@ -161,7 +161,7 @@ async_result< LoginResult > CraftTcpReplica::login(uint64_t client_token) {
     auto ev = hop();
     co_await *ev; // now on the worker thread
     if (!ensure_connected()) co_return fail(craft_error::REPLICA_DOWN);
-    auto r = conn_.login(client_token);
+    auto r = conn_.login(vol_id_, client_token); // LOGIN names the volume, exactly as HELO does
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
     if (r->max_tx) max_tx_ = r->max_tx;  // the volume's max transfer PAYLOAD (login_rsp)
     if (r->lba_size) lba_ = r->lba_size; // block size; with max_tx_ it sizes the on-ring parse bound (framed_body_max)
@@ -198,7 +198,8 @@ async_status CraftTcpReplica::logout(client_hdr hdr) {
     co_return ok();
 }
 
-async_status CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data) {
+async_result< lsn_pair > CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                                sisl::sg_list data) {
     // Serialize the payload NOW, on the CALLER's thread, before the first suspension. This write may be a
     // straggler that keeps running after craft_client acked at quorum and the caller recycled its buffer, so
     // nothing past here may reference `data` (the when_quorum payload contract). This owned copy is the mem
@@ -220,7 +221,7 @@ async_status CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr,
         auto r = co_await aconn_->write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
         if (!r) co_return std::unexpected(net_to_error(r.error()));
         if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
-        co_return ok();
+        co_return lsn_pair{r->commit_lsn, r->last_append_lsn}; // the reply's piggybacked watermarks
     }
 
     auto ev = hop();
@@ -229,11 +230,11 @@ async_status CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr,
     auto r = conn_.write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
     if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
-    co_return ok();
+    co_return lsn_pair{r->commit_lsn, r->last_append_lsn};
 }
 
-async_result< std::vector< io_extent > > CraftTcpReplica::read(client_hdr hdr, int64_t read_lsn, uint64_t addr,
-                                                               uint64_t len, sisl::sg_list dest) {
+async_result< read_result > CraftTcpReplica::read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+                                                  sisl::sg_list dest) {
     // Single-iovec dest: fill it in place. Otherwise read into scratch and scatter into the dest iovecs. Pure
     // span math -- safe on the caller's thread before either path suspends.
     bool const inplace = dest.iovs.size() == 1 && dest.iovs[0].iov_len >= len;
@@ -275,7 +276,7 @@ async_result< std::vector< io_extent > > CraftTcpReplica::read(client_hdr hdr, i
             if (off >= len) break;
         }
     }
-    co_return to_io_extents(reply.extents);
+    co_return read_result{to_io_extents(reply.extents), lsn_pair{reply.commit_lsn, reply.last_append_lsn}};
 }
 
 async_result< lsn_pair > CraftTcpReplica::keep_alive(client_hdr hdr) {
@@ -298,6 +299,17 @@ async_result< lsn_pair > CraftTcpReplica::keep_alive(client_hdr hdr) {
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
     if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
     co_return lsn_pair{r->commit_lsn, r->last_append_lsn};
+}
+
+async_result< resolution_result > CraftTcpReplica::request_resolution(client_hdr hdr, int64_t upto) {
+    // Rare, admin-shaped op: always the blocking worker path (like login/logout), never the ring.
+    auto ev = hop();
+    co_await *ev;
+    if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
+    auto r = conn_.resolve(upto, hdr.commit_lsn, hdr.all_committed_lsn);
+    if (!r) co_return std::unexpected(on_net_fault(r.error()));
+    if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
+    co_return resolution_result{r->resolved_upto, std::move(r->empty_slots)};
 }
 
 // ── peer-facing: a client never invokes these; stubbed so the vtable is complete ──

@@ -69,6 +69,7 @@ private:
     void on_write(craft_conn&, wire::message const&);
     void on_read(craft_conn&, wire::message const&);
     void on_keep_alive(craft_conn&, wire::message const&);
+    void on_resolve(craft_conn&, wire::message const&);
 };
 
 } // namespace craft::net

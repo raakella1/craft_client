@@ -31,6 +31,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -124,10 +125,14 @@ public:
     // ── craft_replica: client-facing ──
     async_result< LoginResult > login(uint64_t client_token) override;
     async_status logout(client_hdr hdr) override;
-    async_status write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data) override;
-    async_result< std::vector< io_extent > > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                  sisl::sg_list dest) override;
+    async_result< lsn_pair > write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                   sisl::sg_list data) override;
+    async_result< read_result > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+                                     sisl::sg_list dest) override;
     async_result< lsn_pair > keep_alive(client_hdr hdr) override;
+    // The client-requested resolution round: term-fenced, then delegated to the transport's cold path
+    // (leader-only; the model's stand-in for the leader's SyncRSCommitLSN pre-resolution).
+    async_result< resolution_result > request_resolution(client_hdr hdr, int64_t upto) override;
 
     // On-ring data path: bind write/read/keep_alive to `ring` so their delivery timer is a ring SQE the ring
     // owner's reap loop completes (many legs in flight at once, QD>1, on the caller's thread) instead of a
@@ -152,15 +157,18 @@ public:
     // these -- its public craft_replica methods above require net_ and are unused. This is the seam the
     // roadmap's "reuse MemCraftReplica" rides on: the journal / index / apply / fencing, minus the model
     // network. ──
-    status srv_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
-                     std::shared_ptr< std::vector< uint8_t > > bytes) {
+    result< lsn_pair > srv_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                 std::shared_ptr< std::vector< uint8_t > > bytes) {
         return do_write(hdr, dlsn, addr, len, std::move(bytes));
     }
-    result< std::vector< io_extent > > srv_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                sisl::sg_list dest) {
+    result< read_result > srv_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+                                   sisl::sg_list dest) {
         return do_read(hdr, read_lsn, addr, len, std::move(dest));
     }
     result< lsn_pair > srv_keep_alive(client_hdr hdr) { return do_keep_alive(hdr); }
+    // The standalone (one-process = one-replica) resolution round: itself lacking a slot IS the quorum-lacks
+    // evidence at N=1, so every hole <= upto is verdicted Empty and the frontier advances through it.
+    result< resolution_result > srv_resolve(client_hdr hdr, int64_t upto) { return do_resolve_local(hdr, upto); }
     void srv_establish(uint64_t client_token, uint64_t term) { cold_apply_login(client_token, term); }
     void srv_end() { cold_apply_logout(); }
     lsn_pair srv_lsns() { return peek_lsns(); }
@@ -195,14 +203,14 @@ private:
     // Synchronous cores: the SERVER. Each takes mu_. Deliverability, latency and payload ownership are the
     // transport's job (MemTransport::send_*), which is why nothing below consults net_ or copies bytes.
     // do_write takes the payload already owned and adopts it; `bytes == nullptr` is a zero write.
-    status do_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
-                    std::shared_ptr< std::vector< uint8_t > > bytes);
-    result< std::vector< io_extent > > do_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
-                                               sisl::sg_list dest);
+    result< lsn_pair > do_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                std::shared_ptr< std::vector< uint8_t > > bytes);
+    result< read_result > do_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len, sisl::sg_list dest);
     result< lsn_pair > do_keep_alive(client_hdr hdr);
     result< lsn_pair > do_lsns();
     status do_truncate(int64_t lsn);
     result< std::vector< JournalSlot > > do_fetch(std::vector< int64_t > const& lsns);
+    result< resolution_result > do_resolve_local(client_hdr hdr, int64_t upto); // N=1 resolution (srv seam)
 
     // ── on-ring transport (prepare_for_async) ──
     // ring_delay suspends the calling leg on a timeout/nop SQE placed on ring_; the reap loop's
@@ -227,6 +235,14 @@ private:
     void cold_apply_login(uint64_t client_token, uint64_t term);
     void cold_apply_logout();
     void cold_truncate_above(int64_t rs_commit_lsn);
+
+    // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
+    // holder's bytes buffer (immutable once appended), so a fill copies no payload.
+    std::optional< MemJournalSlot > peek_slot(int64_t dlsn);        // copy of the slot, or nullopt if absent
+    void cold_install_slot(int64_t dlsn, MemJournalSlot s);         // fill a hole; never overwrites an entry
+    void cold_mark_empty(int64_t dlsn);                             // Empty verdict tombstone; overwrites held
+                                                                    // data (reconciliation: Empty beats data)
+    std::vector< int64_t > peek_empties(int64_t upto);              // every is_empty dLSN <= upto
 
     // Test observability: how many reads this replica actually served. Lets a test witness read routing
     // (e.g. round-robin distribution across members). Not part of the CRAFT surface.

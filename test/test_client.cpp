@@ -84,12 +84,24 @@ std::vector< uint8_t > rd(craft::craft_client& c, uint64_t off_blk, uint64_t nbl
     return dest;
 }
 
-// Only the leader accepts the write, so it journals the slot while quorum(3)=2 goes unmet: the slot stays
-// unresolved and the leader physically holds it.
+// Only the leader accepts the write, so it journals the slot while quorum(3)=2 goes unmet: the slot fails --
+// and the failure fires the client-requested resolution round, which (leader up, quorum live) FILLS the slot
+// from the leader's copy and retires it: the failed write completes late, durable everywhere. Use this to
+// exercise the round; use write_subquorum_unhealed for the unresolved WINDOW.
 void write_subquorum(Cluster& cl, uint64_t off_blk, std::vector< uint8_t >& buf) {
     cl.set.net->force_subquorum({craft::mem_replica_id(cl.vid, 0)});
     EXPECT_FALSE(wr(*cl.client, off_blk, buf));
     cl.set.net->clear_faults();
+}
+
+// Fail a write sub-quorum WITHOUT letting the resolution round heal it: the LEADER is down for the write, so
+// the round (leader-only) dies with REPLICA_DOWN and the slot stays unresolved -- the fencing window the
+// horizon tests pin. Replica 1 is the surviving sub-quorum holder.
+void write_subquorum_unhealed(Cluster& cl, uint64_t off_blk, std::vector< uint8_t >& buf) {
+    cl.set.replicas[0]->set_up(false);
+    cl.set.net->force_subquorum({craft::mem_replica_id(cl.vid, 1)});
+    EXPECT_FALSE(wr(*cl.client, off_blk, buf));
+    cl.set.net->clear_faults(); // everyone healthy again -- but nothing re-fires the dead round
 }
 } // namespace
 
@@ -129,6 +141,23 @@ TEST(CraftClient, N1_CommitAdvancesOnAck) {
     EXPECT_TRUE(rg(cl.client->flush()).has_value());
 }
 
+// Every IO response piggybacks the replica's {commit_lsn, last_append_lsn}, and the client feeds them to its
+// router -- so the reclaim floor (all_committed = min synced) advances off ordinary writes and reads, with NO
+// keep_alive/flush round required.
+TEST(CraftClient, N1_WriteAndReadRepliesAdvanceTheReclaimFloor) {
+    auto cl = make_cluster(1);
+    EXPECT_EQ(cl.client->all_committed_lsn(), -1); // login baseline
+    auto b0 = page_of(0x11);
+    auto b1 = page_of(0x22);
+
+    ASSERT_TRUE(wr(*cl.client, 0, b0)); // carries commit=-1; its reply cannot advance anything yet
+    ASSERT_TRUE(wr(*cl.client, 1, b1)); // carries commit=0 -> the replica applies 0 and its reply reports it
+    EXPECT_EQ(cl.client->all_committed_lsn(), 0) << "the write reply's watermark advanced the floor";
+
+    EXPECT_EQ(rd(*cl.client, 1), b1); // carries commit=1 -> the read reply reports commit_lsn=1
+    EXPECT_EQ(cl.client->all_committed_lsn(), 1) << "the read reply's watermark advanced the floor";
+}
+
 // --- n=3: quorum path the next step builds on ---
 
 TEST(CraftClient, N3_QuorumWriteRead) {
@@ -164,15 +193,15 @@ TEST(CraftClient, N3_FailedWriteDoesNotLeakIntoReads) {
     auto v1 = page_of(0x11);
     auto v2 = page_of(0x12);
 
-    ASSERT_TRUE(wr(*cl.client, 4, v0)); // dLSN 0: durable at block 4
+    ASSERT_TRUE(wr(*cl.client, 4, v0));   // dLSN 0: durable at block 4
     EXPECT_EQ(cl.client->commit_lsn(), 0);
-    write_subquorum(cl, 4, v1);         // dLSN 1: unresolved, and the leader HOLDS it
-    ASSERT_TRUE(wr(*cl.client, 9, v2)); // dLSN 2: acks, pushing the horizon above the hole
+    write_subquorum_unhealed(cl, 4, v1);  // dLSN 1: unresolved (round dead), replica 1 HOLDS it
+    ASSERT_TRUE(wr(*cl.client, 9, v2));   // dLSN 2: acks, pushing the horizon above the hole
 
     EXPECT_EQ(cl.client->commit_lsn(), 0) << "commit must stay pinned beneath the unresolved dLSN 1";
     EXPECT_EQ(cl.client->read_horizon(), 2);
 
-    // Reading block 4 at the raw horizon would let the leader serve its journaled dLSN 1, which may yet
+    // Reading block 4 at the raw horizon would let the holder serve its journaled dLSN 1, which may yet
     // be Empty'd -- a later read would then regress. The client clamps below it and serves dLSN 0.
     EXPECT_EQ(rd(*cl.client, 4), v0);
     EXPECT_EQ(cl.client->winner_scans(), 1u) << "the per-block winner pass is what made this safe";
@@ -186,9 +215,9 @@ TEST(CraftClient, N3_AckedOverwriteShadowsAFailedWrite) {
     auto v1 = page_of(0x21);
     auto v2 = page_of(0x22);
 
-    ASSERT_TRUE(wr(*cl.client, 6, v0)); // dLSN 0
-    write_subquorum(cl, 6, v1);         // dLSN 1: failed, leader holds it
-    ASSERT_TRUE(wr(*cl.client, 6, v2)); // dLSN 2: same block, acks
+    ASSERT_TRUE(wr(*cl.client, 6, v0));  // dLSN 0
+    write_subquorum_unhealed(cl, 6, v1); // dLSN 1: failed and unresolved, replica 1 holds it
+    ASSERT_TRUE(wr(*cl.client, 6, v2));  // dLSN 2: same block, acks
 
     // Highest dLSN wins per LBA, so dLSN 2 fully shadows the unresolved dLSN 1: it can never be the version
     // a read sees, and the read proceeds at the full horizon.
@@ -202,17 +231,57 @@ TEST(CraftClient, N3_SplitReadServesEachBlockAtItsOwnHorizon) {
     auto v1 = page_of(0x31, 2); // blocks 4-5, will fail
     auto v2 = page_of(0x32);    // block 4 only
 
-    ASSERT_TRUE(wr(*cl.client, 4, v0)); // dLSN 0: both blocks durable
-    write_subquorum(cl, 4, v1);         // dLSN 1: failed, leader journals it over BOTH blocks
-    ASSERT_TRUE(wr(*cl.client, 4, v2)); // dLSN 2: acks, but covers only block 4
+    ASSERT_TRUE(wr(*cl.client, 4, v0));  // dLSN 0: both blocks durable
+    write_subquorum_unhealed(cl, 4, v1); // dLSN 1: failed and unresolved, journaled over BOTH blocks
+    ASSERT_TRUE(wr(*cl.client, 4, v2));  // dLSN 2: acks, but covers only block 4
 
     // Block 4's newest version is the acked dLSN 2, which supersedes the failed dLSN 1 there. Block 5's is
-    // the failed dLSN 1 itself, which the leader physically holds. One horizon cannot serve both.
+    // the failed dLSN 1 itself, which replica 1 physically holds. One horizon cannot serve both.
     std::vector< uint8_t > want;
     want.insert(want.end(), v2.begin(), v2.end());          // block 4 -> v2 (read at the horizon)
     want.insert(want.end(), v0.begin(), v0.begin() + PAGE); // block 5 -> v0 (clamped below dLSN 1)
     EXPECT_EQ(rd(*cl.client, 4, 2), want);
     EXPECT_EQ(cl.client->commit_lsn(), 0) << "the failed write still pins commit";
+}
+
+// --- the client-requested resolution round: a failed write is resolved NOW, not at the next login ---
+
+// The round FILLS the slot: the leader holds the sub-quorum copy, so the round fetches it everywhere and the
+// failed write completes late (the design's benign false-include). The frontier releases immediately -- the
+// round runs synchronously in the in-process model -- and the value becomes the durable version of the block.
+TEST(CraftClient, N3_ResolutionRoundFillsAFailedWriteAndReleasesTheFrontier) {
+    auto cl = make_cluster(3);
+    auto v0 = page_of(0x40);
+    auto v1 = page_of(0x41);
+
+    ASSERT_TRUE(wr(*cl.client, 4, v0)); // dLSN 0
+    EXPECT_EQ(cl.client->commit_lsn(), 0);
+    write_subquorum(cl, 4, v1); // dLSN 1 fails; the round fires, fills from the leader, retires the slot
+
+    EXPECT_EQ(cl.client->commit_lsn(), 1) << "the round resolved the slot; nothing pins the frontier";
+    EXPECT_EQ(rd(*cl.client, 4), v1) << "the failed write completed late: it IS the durable version now";
+
+    // Every live member ends up holding the filled slot (the model's round pushes synchronously).
+    for (auto& r : cl.set.replicas)
+        EXPECT_EQ(r->stats().journal_slots, 2u);
+}
+
+// The round declares EMPTY: nobody holds the slot (the one copy is stuck in a 10s-delayed transport), so the
+// leader verdicts it Empty on quorum-lacks evidence and tombstones it -- the late arrival is then REJECTED
+// (reconciliation: Empty beats data), so no replica can resurrect a voided write.
+TEST(CraftClient, N3_ResolutionRoundVerdictsEmptyWhenNobodyHoldsTheSlot) {
+    auto cl = make_cluster(3);
+    cl.set.net->set_op_timeout(std::chrono::milliseconds{20});
+    cl.set.net->set_delay(craft::mem_replica_id(cl.vid, 0), std::chrono::seconds{10}); // stuck, lands late
+    cl.set.net->force_subquorum({craft::mem_replica_id(cl.vid, 0)});                   // 1 and 2 refuse outright
+
+    auto v = page_of(0x50);
+    EXPECT_FALSE(wr(*cl.client, 7, v)); // leg 0 times out, legs 1-2 refuse -> failed (not provably absent)
+    cl.set.net->clear_faults();
+
+    EXPECT_EQ(cl.client->commit_lsn(), 0) << "the round verdicted dLSN 0 Empty and the frontier passed it";
+    EXPECT_EQ(rd(*cl.client, 7), page_of(0)) << "a voided write reads as never-written";
+    EXPECT_GE(cl.set.replicas[1]->stats().empty_slots, 1u) << "the verdict tombstone is journaled";
 }
 
 // --- session establishment ---
@@ -296,7 +365,7 @@ TEST(CraftClient, N3_StragglerWriteLandsIntactAfterTheClientReturned) {
     std::vector< uint8_t > dest(PAGE, 0xEE);
     auto const out = rg(r.read(chdr(cl.client->term(), /*commit*/ 0), /*H*/ 0, blk(6), blk(1), one_iov(dest)));
     ASSERT_TRUE(out.has_value());
-    EXPECT_FALSE((*out)[0].hole);
+    EXPECT_FALSE(out->extents[0].hole);
     EXPECT_EQ(dest, page_of(0x5E)) << "payload survived; the replica copied it at issue, not after its sleep";
 }
 
@@ -326,9 +395,9 @@ TEST(CraftClient, N3_PartialRefusalPinsTheFrontier) {
     ASSERT_TRUE(wr(*cl.client, 1, buf));
     EXPECT_EQ(cl.client->commit_lsn(), 0);
 
-    cl.set.net->force_subquorum({craft::mem_replica_id(cl.vid, 0)}); // the leader still holds it
-    EXPECT_FALSE(wr(*cl.client, 2, buf));
-    cl.set.net->clear_faults();
+    // A partial refusal is NOT provably absent (replica 1 holds dLSN 1), so the slot stays unresolved -- and
+    // with the leader down, the resolution round that would fill or Empty it cannot run. Commit must stall.
+    write_subquorum_unhealed(cl, 2, buf);
 
     EXPECT_EQ(cl.client->commit_lsn(), 0) << "some replica may hold dLSN 1; commit must stall under it";
 }

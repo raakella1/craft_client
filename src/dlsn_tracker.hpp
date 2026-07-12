@@ -24,6 +24,7 @@
 //
 // See README.md for the per-block horizon derivation, the split read, and the memory-ordering rationale.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -124,7 +125,51 @@ public:
     // able to hold this slot implies a scanner can already see it.
     int64_t reserve(uint64_t addr, uint64_t len);
 
+    // Never downgrades: once a slot is RESOLVED (acked / empty) a later resolve is a no-op. That is what lets
+    // a resolution round retire an in-flight slot off the leader's verdict while the slot's own broadcast legs
+    // are still completing -- whichever lands second is dropped, not fought over.
     void resolve(int64_t dlsn, slot_outcome oc);
+
+    // ── the client-requested resolution round (the design's client-request SyncRSCommitLSN trigger) ──
+    //
+    // The WANT watermark: the highest failed dLSN awaiting a round, hosted here so the detached per-peer
+    // resolution legs outlive the client safely (each captures the tracker's shared_ptr). A burst of failed
+    // writes CAS-maxes into one value; only a SUCCESSFUL round consumes it (clear_resolution_want) -- a
+    // non-leader leg answering NOT_LEADER must leave it for the leader's leg. The per-peer one-outstanding
+    // gate lives in read_route_map (rr_inflight_), beside the keep_alive collapse it mirrors.
+    void note_resolution_want(int64_t upto);           // CAS-max: record a failed slot needing a round
+    std::optional< int64_t > resolution_want() const;  // peek (never consumes); nullopt = nothing pending
+    void clear_resolution_want(int64_t resolved_upto); // consume iff the want is <= what the round resolved
+
+    // After a round: every slot <= upto is resolved server-side. Walk OUR unresolved slots <= upto and retire
+    // each: Empty if it is in `empties` (ascending), else acked (it was filled from a holder -- the failed
+    // write completed late). `on_filled(dlsn)` fires BEFORE the acked resolve, so the router can queue its
+    // conservative miss / verdict flag first (the same push-before-completed-bit ordering record_completion
+    // keeps). A slot whose create() is not yet visible is skipped: its own legs resolve it (they are rejected
+    // deterministically into a verdicted slot).
+    template < typename Fn >
+    void retire_upto(int64_t upto, std::vector< int64_t > const& empties, Fn&& on_filled) {
+        if (!tracker_) return;
+        int64_t const hi = std::min(upto, next_dlsn_.load(std::memory_order_acquire) - 1);
+        for (int64_t h = frontier() + 1; h <= hi;) {
+            int64_t const u = std::min(tracker_->completed_upto(h), hi) + 1;
+            if (u > hi) break;
+            bool active = false;
+            tracker_->foreach_all_active(u, [&](int64_t idx, dlsn_slot&) {
+                active = (idx == u);
+                return false;
+            });
+            if (active) {
+                if (std::binary_search(empties.begin(), empties.end(), u)) {
+                    resolve(u, slot_outcome::empty);
+                } else {
+                    on_filled(u);
+                    resolve(u, slot_outcome::acked);
+                }
+            }
+            h = u + 1;
+        }
+    }
 
     int64_t frontier() const { return frontier_.load(std::memory_order_acquire); }
     int64_t read_horizon() const { return std::max(frontier(), highest_acked_.load(std::memory_order_acquire)); }
@@ -168,6 +213,7 @@ private:
     std::atomic< int64_t > highest_acked_{-1}; // Ha: max quorum-acked dLSN
     std::atomic< int64_t > last_trunc_{-1};
     std::atomic< uint64_t > winner_scans_{0};
+    std::atomic< int64_t > resolve_want_{-1}; // highest failed dLSN awaiting a resolution round
 
     std::optional< sisl::StreamTracker< dlsn_slot > > tracker_; // constructed at login
     resolution_gate gate_;

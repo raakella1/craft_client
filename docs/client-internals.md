@@ -115,6 +115,23 @@ holds the slot, it is a permanent no-op, and the frontier may pass over it. A su
 degrades to `failed`. Counting a timeout here would advance `F` past a dLSN a peer later applies, which is
 divergence. In every other respect all non-acks are equal.
 
+A `failed` outcome no longer waits for the next login: it fires the **client-requested resolution round**
+(`craft_replica::request_resolution`, the design's client-request `SyncRSCommitLSN` trigger). The client
+cannot know who the leader is mid-session (it learned one at login; leadership may have moved), so the
+request is **broadcast to every member** as detached fire-and-forget legs, with at most **one outstanding per
+peer** -- exactly the keep_alive collapse (`rr_inflight_` beside `ka_inflight_`), so a burst of failed
+in-flight writes collapses into the pending legs rather than one request per failure. The failed dLSNs
+CAS-max into a single *want* watermark (`dlsn_tracker`); whichever member is the current leader resolves
+every unresolved slot <= the want -- fills it from a holder (the failed write completes late) or verdicts it
+Empty on quorum-lacks evidence -- while non-leaders answer `NOT_LEADER` and leave the want untouched (only a
+successful round consumes it). The client retires the covered slots off the reply
+(`dlsn_tracker::retire_upto`): Empty verdicts resolve `empty`, filled slots resolve `acked` with the router
+told first (`note_filled`: the slot becomes verdict-durable and reads route only to its certain holders until
+the commit certificates catch up). A replica REJECTS a late arrival into an Empty-verdicted slot, so a write
+the round voided fails deterministically on its own ack path -- the verdict and the client's local `Empty`
+conclusion agree. If no leg can resolve (leader down), the slot simply stays pinned and the next failed write
+re-fires the legs.
+
 ### Where a write actually goes
 
 ```
@@ -336,12 +353,16 @@ writes lock-free, so they do not clear an earlier miss.
 `keep_alive` is CRAFT's commit carrier: it returns a member's achieved `{commit_lsn, last_append_lsn}` and
 resets its session watchdog. The client uses it two ways.
 
-**The reclaim floor.** `flush()` broadcasts `keep_alive` to every replica and feeds each reply's `commit_lsn`
-to the router via `advance_synced(i, C)`. `synced[i]` is the client's model of member `i`'s applied watermark,
-so `all_committed = min(synced)` -- stamped into `client_hdr.all_committed_lsn` -- is the set-wide journal
-reclaim floor. Being the MIN, a member with a hole (its `commit_lsn` stalls just below the hole) correctly
-pins the floor down, holding the journal a peer still needs to resync from; a member never heard from sits at
-the login baseline, pinning it there. This replaced a placeholder `-1` that reclaimed nothing.
+**The reclaim floor.** Every IO response piggybacks the member's `{commit_lsn, last_append_lsn}`
+(`craft_replica::write` returns an `lsn_pair`, `read` returns `read_result{extents, lsns}`), and the client
+feeds each reply's `commit_lsn` to the router via `advance_synced(i, C)` -- from the write legs, from the read
+it served, and from every `keep_alive` (`flush()` broadcasts one to each replica). `synced[i]` is the client's
+model of member `i`'s applied watermark, so `all_committed = min(synced)` -- stamped into
+`client_hdr.all_committed_lsn` -- is the set-wide journal reclaim floor, and it now advances off ordinary IO
+with no keep_alive round required. `advance_synced` keeps the ack path cheap with a lock-free monotonic
+pre-check (no news = one atomic load). Being the MIN, a member with a hole (its `commit_lsn` stalls just below
+the hole) correctly pins the floor down, holding the journal a peer still needs to resync from; a member never
+heard from sits at the login baseline, pinning it there.
 
 **Timer-less keep_alive, driven off IO + idle.** Rather than run a dedicated timer, the client drives
 `keep_alive` off the events it already has: a **read** touches one leg, so it fires a `keep_alive` at every
@@ -375,9 +396,9 @@ Also outstanding, in rough order:
 
 - the server-side **watchdog** the keep_alive drive is meant to reset (a deferred seam today,
   `mem_craft_replica.cpp`), and server-side **resync** (`SyncRSCommitLSN`) that makes the recovery erase above
-  effective -- both are server/peer concerns, not client work;
-- re-login on `STALE_TERM`, and `resolve_upto()` to retire a `failed` hole after a leader resolution
-  round (there is no public verb for one today);
+  effective -- both are server/peer concerns, not client work (the client-REQUESTED resolution round and its
+  retire path now exist: `request_resolution` / `retire_upto`, see *A non-ack is not one thing*);
+- re-login on `STALE_TERM`;
 - the client-side all-zero scan that picks the CRAFT zero-write form (the server does not re-scan a data
   write), plus ublk `DISCARD` / `WRITE_ZEROES` → a CRAFT zero write (empty `sg_list`);
 - reply-side fault injection. The wire models the request leg only: `plan_delivery` conflates the round trip
@@ -501,7 +522,7 @@ deployment does not do in-process:
 | `CraftUblkDisk` | **0** | -- |
 | `dlsn_tracker`'s `StreamTracker` | 2, both *shared* | `create` at reserve + `update` at resolve; exclusive only on `truncate` (1-in-512) and resize |
 | `read_route_map`'s `StreamTracker` | 4, all *shared* | `create` at reserve + one `update` per replica completion. The **same** `sisl::StreamTracker` the tracker uses. Completions are shared-lock updates (stragglers off the ack path); reads take the shared lock to `foreach`; exclusive only on batched `truncate`/resize |
-| `read_route_map`'s `map_mu_` | 1 *shared* per read; **0** per healthy write | guards the per-member Missing maps. A read takes it *shared* for the `intersects` query (empty map = trivial); a healthy write records no miss, so it never touches it. Taken *exclusive* by a fold that must apply a miss (fault-cold) and by `advance_synced` on each keep_alive reply -- both **off the read/write ack path** (a keep_alive completes on a detached background task). (`pending_mu_`/`fold_mu_` are two more std::mutexes touched only off the ack path; `ka_inflight_` is a lock-free atomic per leg.) |
+| `read_route_map`'s `map_mu_` | 1 *shared* per read; **0** per healthy write | guards the per-member Missing maps. A read takes it *shared* for the `intersects` query (empty map = trivial); a healthy write records no miss, so it never touches it. Taken *exclusive* by a fold that must apply a miss (fault-cold) and by `advance_synced` when a reply's `commit_lsn` actually advances a member's watermark -- `advance_synced` now runs on the write/read ack paths too (every IO response piggybacks the watermarks), guarded by a lock-free monotonic pre-check so the no-news case is one atomic load. (`pending_mu_`/`fold_mu_` are two more std::mutexes; `ka_inflight_` is a lock-free atomic per leg.) |
 | `MemTransport::mu_` | **0** | guards `by_id_`/`leader_`/`term_` only. Faults are read off a copy-on-write snapshot (`faults()`), so the IO path is two acquire loads |
 | `replica_service::mu` | 6 (post + pop, per replica) | the model's stand-in for a NIC. A real transport submits an SQE here |
 | `MemCraftReplica::mu_` | 3 (one journal insert each) | the *server*, on the far side of the wire. Not the client's cost |

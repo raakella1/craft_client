@@ -77,7 +77,7 @@ void with_session(F&& body) {
     {
         auto cli = craft_tcp_client::connect("127.0.0.1", port);
         ASSERT_TRUE(cli.has_value());
-        auto lr = cli->login(0x1234);
+        auto lr = cli->login(/*volume_id=*/{}, 0x1234); // the standalone server fronts one volume: any id binds
         ASSERT_TRUE(lr.has_value());
         body(*cli, *lr);
     }
@@ -101,7 +101,7 @@ TEST(CraftTcp, LoginLogoutRoundTrip) {
         auto cli = craft_tcp_client::connect("127.0.0.1", port);
         ASSERT_TRUE(cli.has_value());
 
-        auto lr = cli->login(0xABCD);
+        auto lr = cli->login(/*volume_id=*/{}, 0xABCD);
         ASSERT_TRUE(lr.has_value());
         EXPECT_EQ(lr->term, 1u);
         EXPECT_EQ(lr->capacity, uint64_t{1} << 30);

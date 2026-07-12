@@ -105,7 +105,8 @@ async_status MemCraftReplica::logout(client_hdr hdr) {
 // latency -- the code below is just the server (journal + index) and copies nothing. On-ring: the SAME delivery
 // model, but this file owns the payload copy + delivery timer and submits it as an SQE on the driver's ring, so
 // N legs run in flight at once and complete on the driver's reap thread.
-async_status MemCraftReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data) {
+async_result< lsn_pair > MemCraftReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                                sisl::sg_list data) {
     if (!net_) co_return fail(craft_error::NO_QUORUM); // no wire, nothing to deliver over
     if (!ring_) co_return co_await net_->send_write(shared_from_this(), hdr, dlsn, addr, len, std::move(data));
 
@@ -129,8 +130,8 @@ async_status MemCraftReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr,
     if (!rf2->up || !rf2->write_ok) co_return fail(craft_error::REPLICA_DOWN); // went unreachable in flight
     co_return do_write(hdr, dlsn, addr, len, std::move(bytes));
 }
-async_result< std::vector< io_extent > > MemCraftReplica::read(client_hdr hdr, int64_t read_lsn, uint64_t addr,
-                                                               uint64_t len, sisl::sg_list dest) {
+async_result< read_result > MemCraftReplica::read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+                                                  sisl::sg_list dest) {
     if (!net_) co_return fail(craft_error::NO_QUORUM);
     if (!ring_) co_return co_await net_->send_read(shared_from_this(), hdr, read_lsn, addr, len, std::move(dest));
 
@@ -201,6 +202,17 @@ async_status MemCraftReplica::late_write(client_hdr hdr, int64_t dlsn, uint64_t 
     if (lf->up && lf->write_ok) (void)do_write(hdr, dlsn, addr, len, std::move(bytes)); // dropped iff down in flight
     co_return ok();
 }
+async_result< resolution_result > MemCraftReplica::request_resolution(client_hdr hdr, int64_t upto) {
+    if (!net_) co_return fail(craft_error::NO_QUORUM); // srv-seam replicas resolve via srv_resolve instead
+    if (!is_up()) co_return fail(craft_error::REPLICA_DOWN);
+    // Term-fenced like logout: a deposed client must not be able to void the successor's in-flight slots.
+    {
+        std::lock_guard< std::mutex > g{mu_};
+        if (hdr.term != state_.term) co_return fail(craft_error::STALE_TERM);
+    }
+    co_return net_->run_resolution(this, hdr.term, upto);
+}
+
 async_result< lsn_pair > MemCraftReplica::get_lsns() { co_return do_lsns(); }
 async_result< lsn_pair > MemCraftReplica::get_rs_commit_lsn() { co_return do_lsns(); }
 async_result< std::vector< JournalSlot > > MemCraftReplica::fetch_data(std::vector< int64_t > lsns) {
@@ -213,8 +225,8 @@ async_status MemCraftReplica::truncate(int64_t lsn) { co_return do_truncate(lsn)
 // Takes the payload ALREADY owned: write() copied it exactly once, at issue. The journal slot adopts that
 // buffer, so nothing here copies bytes -- this is the replica persisting what the transport handed it.
 // `bytes == nullptr` is a zero write (WRITE_ZEROES), which allocates nothing.
-status MemCraftReplica::do_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
-                                 std::shared_ptr< std::vector< uint8_t > > bytes) {
+result< lsn_pair > MemCraftReplica::do_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                             std::shared_ptr< std::vector< uint8_t > > bytes) {
     // Deliverability is the transport's verdict, not ours: by the time we are called, the request arrived.
     // byte-based API: addr/len must be block-aligned (the model works in page_size blocks internally).
     if (addr % page_size_ != 0 || len % page_size_ != 0 || len == 0) {
@@ -225,6 +237,12 @@ status MemCraftReplica::do_write(client_hdr hdr, int64_t dlsn, uint64_t addr, ui
     }
     std::lock_guard< std::mutex > g{mu_};
     if (hdr.term != state_.term) return fail(craft_error::STALE_TERM);
+    if (auto it = journal_.find(dlsn); it != journal_.end() && it->second.is_empty) {
+        // An Empty verdict is permanent (reconciliation: Empty beats data). A late arrival into the slot is
+        // REJECTED -- deterministically -- so that write's own ack path concludes the slot is void, matching
+        // the verdict instead of phantom-acking a write every replica discarded.
+        return std::unexpected(std::make_error_condition(std::errc::invalid_argument));
+    }
 
     MemJournalSlot slot;
     slot.term = hdr.term;
@@ -235,11 +253,12 @@ status MemCraftReplica::do_write(client_hdr hdr, int64_t dlsn, uint64_t addr, ui
     journal_[dlsn] = std::move(slot);
     state_.last_append_lsn = std::max(state_.last_append_lsn, dlsn);
     apply_up_to(hdr.commit_lsn); // piggybacked commit: advance the frontier best-effort, in dLSN order
-    return ok();
+    // Piggyback the watermarks on the ack (the wire's write_rsp), so any round-trip refreshes the client.
+    return lsn_pair{state_.commit_lsn, state_.last_append_lsn};
 }
 
-result< std::vector< io_extent > > MemCraftReplica::do_read(client_hdr hdr, int64_t read_lsn, uint64_t addr,
-                                                            uint64_t len, sisl::sg_list dest) {
+result< read_result > MemCraftReplica::do_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+                                               sisl::sg_list dest) {
     // byte-based API: addr/len block-aligned; dest is a single contiguous buffer covering [addr,addr+len)
     if (addr % page_size_ != 0 || len % page_size_ != 0 || len == 0) {
         return std::unexpected(std::make_error_condition(std::errc::invalid_argument));
@@ -249,7 +268,7 @@ result< std::vector< io_extent > > MemCraftReplica::do_read(client_hdr hdr, int6
     if (hdr.term != state_.term) return fail(craft_error::STALE_TERM);
     apply_up_to(hdr.commit_lsn);                           // piggybacked commit: advance the frontier opportunistically
     reads_served_.fetch_add(1, std::memory_order_relaxed); // test observability: witness read routing
-    return read_range(read_lsn, addr, len, dest);
+    return read_result{read_range(read_lsn, addr, len, dest), lsn_pair{state_.commit_lsn, state_.last_append_lsn}};
 }
 
 result< lsn_pair > MemCraftReplica::do_keep_alive(client_hdr hdr) {
@@ -295,6 +314,30 @@ result< std::vector< JournalSlot > > MemCraftReplica::do_fetch(std::vector< int6
         }
         out.push_back(std::move(js));
     }
+    return out;
+}
+
+// The N=1 resolution round (the srv seam / standalone TCP server): this replica alone is the whole live set,
+// so a hole in its own journal IS the quorum-lacks evidence -- every missing slot <= upto is verdicted Empty
+// (tombstoned, so a late arrival is rejected) and the frontier advances through them.
+result< resolution_result > MemCraftReplica::do_resolve_local(client_hdr hdr, int64_t upto) {
+    std::lock_guard< std::mutex > g{mu_};
+    if (hdr.term != state_.term) return fail(craft_error::STALE_TERM);
+    resolution_result out{upto, {}};
+    for (int64_t d = state_.commit_lsn + 1; d <= upto; ++d) {
+        auto it = journal_.find(d);
+        if (it == journal_.end()) {
+            MemJournalSlot s;
+            s.term = state_.term;
+            s.is_empty = true;
+            journal_[d] = std::move(s);
+            out.empty_slots.push_back(d);
+        } else if (it->second.is_empty) {
+            out.empty_slots.push_back(d); // a prior verdict; re-report it so the client can retire the slot
+        }
+    }
+    state_.last_append_lsn = std::max(state_.last_append_lsn, upto);
+    apply_up_to(upto);
     return out;
 }
 
@@ -478,6 +521,43 @@ void MemCraftReplica::cold_truncate_above(int64_t rs_commit_lsn) {
     std::lock_guard< std::mutex > g{mu_};
     journal_.erase(journal_.upper_bound(rs_commit_lsn), journal_.end());
     state_.last_append_lsn = std::min(state_.last_append_lsn, rs_commit_lsn);
+}
+
+// ── resolution-round hooks (driven by MemTransport::run_resolution) ──
+
+std::optional< MemCraftReplica::MemJournalSlot > MemCraftReplica::peek_slot(int64_t dlsn) {
+    std::lock_guard< std::mutex > g{mu_};
+    auto const it = journal_.find(dlsn);
+    if (it == journal_.end()) return std::nullopt;
+    return it->second; // copies the slot; `bytes` is shared (immutable once appended), so no payload copy
+}
+
+void MemCraftReplica::cold_install_slot(int64_t dlsn, MemJournalSlot s) {
+    std::lock_guard< std::mutex > g{mu_};
+    if (journal_.contains(dlsn)) return; // already holds it (or a verdict); a fetch never overwrites
+    journal_[dlsn] = std::move(s);
+    state_.last_append_lsn = std::max(state_.last_append_lsn, dlsn);
+}
+
+void MemCraftReplica::cold_mark_empty(int64_t dlsn) {
+    std::lock_guard< std::mutex > g{mu_};
+    // Overwrites held data on purpose: the verdict says the slot was never quorum-durable, so a sub-quorum
+    // copy here was never acked and is discarded (the design's reconciliation: Empty beats held data).
+    MemJournalSlot s;
+    s.term = state_.term;
+    s.is_empty = true;
+    journal_[dlsn] = std::move(s);
+    state_.last_append_lsn = std::max(state_.last_append_lsn, dlsn);
+}
+
+std::vector< int64_t > MemCraftReplica::peek_empties(int64_t upto) {
+    std::lock_guard< std::mutex > g{mu_};
+    std::vector< int64_t > out;
+    for (auto const& [d, s] : journal_) {
+        if (d > upto) break;
+        if (s.is_empty) out.push_back(d); // ascending: journal_ is an ordered map
+    }
+    return out;
 }
 
 } // namespace craft

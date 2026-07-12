@@ -98,11 +98,10 @@ public:
     // write long after its replica's last other owner is gone. An in-flight request keeps its server alive.
     // (No cycle: the frame is transient. The transport itself never holds a strong ref to a replica -- see the
     // weak_from_this() in send_write's late-delivery closure.)
-    async_status send_write(std::shared_ptr< MemCraftReplica > to, client_hdr hdr, int64_t dlsn, uint64_t addr,
-                            uint64_t len, sisl::sg_list data);
-    async_result< std::vector< io_extent > > send_read(std::shared_ptr< MemCraftReplica > to, client_hdr hdr,
-                                                       int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                       sisl::sg_list dest);
+    async_result< lsn_pair > send_write(std::shared_ptr< MemCraftReplica > to, client_hdr hdr, int64_t dlsn,
+                                        uint64_t addr, uint64_t len, sisl::sg_list data);
+    async_result< read_result > send_read(std::shared_ptr< MemCraftReplica > to, client_hdr hdr, int64_t read_lsn,
+                                          uint64_t addr, uint64_t len, sisl::sg_list dest);
     async_result< lsn_pair > send_keep_alive(std::shared_ptr< MemCraftReplica > to, client_hdr hdr);
 
     // ── cold path: leader-only orchestration ──
@@ -113,6 +112,15 @@ public:
     // logout: InternalLogout applied to all live replicas. term-fenced. Returns NOT_LEADER if caller
     // is not the leader.
     status run_logout(MemCraftReplica* caller, uint64_t term);
+
+    // The client-requested resolution round (the model's stand-in for the leader's SyncRSCommitLSN
+    // pre-resolution): resolve every slot <= `upto` across the LIVE set -- fill each hole from a live holder
+    // (sharing the holder's buffer; FetchData in miniature), or, when no live replica holds it, verdict it
+    // Empty on every live member (tombstone; a late arrival into the slot is then rejected). Down members are
+    // untouched -- server resync (absent in the model) is what would reconcile them. Leader-only; term-fenced
+    // against the set-wide session term. Returns every Empty verdict <= upto (the leader's tombstones), so a
+    // retiring client also learns verdicts from earlier rounds whose replies it lost.
+    result< resolution_result > run_resolution(MemCraftReplica* caller, uint64_t term, int64_t upto);
 
     // ── membership / routing (consulted by the replicas' client-facing ops) ──
     peer_id_t leader() const;

@@ -146,6 +146,27 @@ TEST(CraftClientTcp, N3_BelowQuorumFails) {
     EXPECT_FALSE(wr(*tc.client, 6, buf));
 }
 
+// A failed write fires the client-requested resolution round over the wire (RESOLVE to the leader): the
+// leader fills the slot from its own copy set-wide, the client retires it off the reply, the frontier
+// releases, and the failed write completes late as the durable version.
+TEST(CraftClientTcp, N3_FailedWriteResolutionRoundHealsOverTcp) {
+    auto tc = make_tcp_cluster(3);
+    auto v0 = page_of(0x60);
+    auto v1 = page_of(0x61);
+    ASSERT_TRUE(wr(*tc.client, 4, v0)); // dLSN 0: durable everywhere
+    tc.set.server->force_subquorum({0});
+    EXPECT_FALSE(wr(*tc.client, 4, v1)); // dLSN 1 fails; the detached RESOLVE round fires at the leader
+    tc.set.server->clear_faults();
+
+    // The round is asynchronous over TCP (it rides the leader proxy's worker): wait for the retire.
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (tc.client->commit_lsn() < 1 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    EXPECT_EQ(tc.client->commit_lsn(), 1) << "the round filled and retired the failed slot";
+    EXPECT_EQ(rd(*tc.client, 4), v1) << "the failed write completed late: it is the durable version";
+    EXPECT_EQ(tc.set.server->journal_slots(1), 2u) << "the fill landed set-wide";
+}
+
 // Two replicas taken fully down fail their reads with REPLICA_DOWN over the wire; the client routes the read
 // around them to the one holder still up.
 TEST(CraftClientTcp, N3_DownReplicasRoutedAroundOnRead) {

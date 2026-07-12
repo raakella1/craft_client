@@ -96,6 +96,7 @@ struct route_slot {
     uint64_t len{0};
     uint64_t holders{0};   // members that acked (hold the data)
     uint64_t completed{0}; // members whose op for this dLSN has finished (acked or not)
+    uint8_t verdict{0};    // 1 = durable by a resolution-round verdict despite a sub-quorum holder count
 };
 
 class read_route_map {
@@ -130,6 +131,7 @@ public:
         for (std::size_t i = 0; i < n; ++i) {
             synced_[i].store(login_dlsn, std::memory_order_relaxed);
             ka_inflight_[i].store(false, std::memory_order_relaxed);
+            rr_inflight_[i].store(false, std::memory_order_relaxed);
         }
         all_committed_.store(login_dlsn, std::memory_order_relaxed); // min synced_ == login baseline
         {
@@ -239,8 +241,9 @@ public:
     //   (b) below the frontier: no Missing byte-range overlapping [addr,len) (per-block precise); and
     //   (c) above the frontier: it holds every DURABLE overlay slot in (folded, Hmax] overlapping the range.
     // A slot with fewer than `quorum` holders is a sub-quorum / failed write, never a winner, so skipped in
-    // (c). Among durable slots (c) is still the "holds every overlap" superset (safe for N=3 by quorum
-    // intersection); per-block gating there is a further refinement.
+    // (c) -- UNLESS a resolution round verdicted it durable (note_filled): then it is required even though
+    // its recorded holder count is sub-quorum. Among durable slots (c) is still the "holds every overlap"
+    // superset (safe for N=3 by quorum intersection); per-block gating there is a further refinement.
     bool eligible(std::size_t idx, uint64_t addr, uint64_t len, int64_t Hmax) {
         if (synced_[idx].load(std::memory_order_acquire) < login_dlsn_) return false; // (a)
         {
@@ -253,8 +256,9 @@ public:
         overlay_->foreach_all_active(fold + 1, [&](int64_t d, route_slot& s) -> bool {
             if (d > Hmax) return false; // past the horizon; stop
             uint64_t const held = std::atomic_ref< uint64_t >(s.holders).load(std::memory_order_acquire);
-            if (static_cast< std::size_t >(std::popcount(held)) < quorum_)
-                return true; // sub-quorum / failed: never a winner, not required
+            bool const durable = (static_cast< std::size_t >(std::popcount(held)) >= quorum_) ||
+                (std::atomic_ref< uint8_t >(s.verdict).load(std::memory_order_acquire) != 0);
+            if (!durable) return true; // sub-quorum / failed, no verdict: never a winner, not required
             if (overlaps(addr, len, s.addr, s.len) && !(held & b)) {
                 ok = false;
                 return false;
@@ -264,6 +268,30 @@ public:
         return ok;
     }
 
+    // A resolution round FILLED formerly-sub-quorum slot `d`: it is durable now, and held FOR CERTAIN by the
+    // leader (it fetched a copy to resolve) plus whoever acked originally; everyone else converges via
+    // server-side resync. Make the slot REQUIRED for routing despite its sub-quorum holder count (the
+    // `verdict` flag, read by eligible()), and queue the conservative miss so the fold marks the non-holders
+    // once it folds -- exactly what a durable-but-non-universal completion would have handed over. Runs
+    // before the tracker resolves the slot acked, so the fold (which chases the frontier) cannot pass `d`
+    // without seeing the pending entry.
+    void note_filled(int64_t d, std::size_t leader_idx) {
+        uint64_t const lb = bit(leader_idx);
+        overlay_->update(d, [&](route_slot& s) -> bool {
+            uint64_t const held = std::atomic_ref< uint64_t >(s.holders).fetch_or(lb, std::memory_order_seq_cst) | lb;
+            std::atomic_ref< uint8_t >(s.verdict).store(1, std::memory_order_release);
+            if (held != all_mask_) {
+                std::lock_guard< std::mutex > g{pending_mu_};
+                pending_.push_back(pending_miss{s.dlsn, held, s.addr, s.len});
+                int64_t h = pending_hint_.load(std::memory_order_relaxed);
+                while (s.dlsn < h &&
+                       !pending_hint_.compare_exchange_weak(h, s.dlsn, std::memory_order_release,
+                                                            std::memory_order_relaxed)) {}
+            }
+            return false; // the completed bit belongs to record_completion (all legs finished); untouched here
+        });
+    }
+
     // Recovery hook, fed by the broadcast keep_alive with member `idx`'s achieved commit_lsn `C`. Two effects:
     // (1) advance `synced_[idx]` and recompute `all_committed_` (the min-across-members reclaim floor) -- this
     // is live; (2) erase `miss_[idx]` segments <= C, i.e. blocks the member has since applied. Effect (2) is
@@ -271,6 +299,10 @@ public:
     // first Missing hole, so nothing at/above that hole clears until resync fills it (then C passes it and the
     // erase fires). This is the sole place synced_ advances and the sole non-fold map mutation.
     void advance_synced(std::size_t idx, int64_t C) {
+        // Lock-free monotonic pre-check: every IO response piggybacks the member's watermarks now, so this is
+        // fed from the write/read ack paths too, not just the detached keep_alives -- the no-news case must
+        // stay a single atomic load.
+        if (C <= synced_[idx].load(std::memory_order_acquire)) return;
         std::lock_guard< std::mutex > fg{fold_mu_};
         if (C <= synced_[idx].load(std::memory_order_relaxed)) return;
         synced_[idx].store(C, std::memory_order_release);
@@ -292,6 +324,13 @@ public:
     // detached keep_alive outlives the client (it captures this map's shared_ptr) and clears the flag here.
     bool try_begin_keepalive(std::size_t idx) { return !ka_inflight_[idx].exchange(true, std::memory_order_acq_rel); }
     void end_keepalive(std::size_t idx) { ka_inflight_[idx].store(false, std::memory_order_release); }
+
+    // The identical collapse for the client-requested resolution round: at most ONE outstanding
+    // request_resolution per member. A burst of failed in-flight writes tops a peer up again only once its
+    // previous request completed, never one request per failure (the want watermark in dlsn_tracker is what
+    // accumulates the burst).
+    bool try_begin_resolution(std::size_t idx) { return !rr_inflight_[idx].exchange(true, std::memory_order_acq_rel); }
+    void end_resolution(std::size_t idx) { rr_inflight_[idx].store(false, std::memory_order_release); }
 
     // Observability / tests.
     int64_t folded() const { return folded_.load(std::memory_order_acquire); }
@@ -340,6 +379,8 @@ private:
         synced_{}; // per member: client's model of its commit_lsn (>= L)
     std::array< std::atomic< bool >, k_max_members >
         ka_inflight_{}; // per member: a keep_alive is outstanding (the one-per-leg collapse)
+    std::array< std::atomic< bool >, k_max_members >
+        rr_inflight_{}; // per member: a request_resolution is outstanding (same collapse)
 
     std::mutex pending_mu_;                       // guards pending_
     std::vector< pending_miss > pending_;         // durable non-universal completed slots awaiting fold

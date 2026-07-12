@@ -70,6 +70,9 @@ void craft_tcp_server::serve(craft_conn conn) {
         case wire::op::keepalive:
             on_keep_alive(conn, *parsed);
             break;
+        case wire::op::resolve:
+            on_resolve(conn, *parsed);
+            break;
         case wire::op::logout:
             on_logout(conn, *parsed);
             break;
@@ -80,6 +83,8 @@ void craft_tcp_server::serve(craft_conn conn) {
 }
 
 void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
+    // login_req names the volume; this standalone reference server fronts exactly one, so any presented id is
+    // accepted (like its fake HELO cold path). A multi-volume server routes the session-establishment by it.
     auto const lr = wire::decode< wire::login_req >(req.op_header);
     session_term_ = ++next_term_; // a fresh session term, established (and fenced) on this connection
     session_active_ = true;
@@ -133,8 +138,10 @@ void craft_tcp_server::on_logout(craft_conn& conn, wire::message const& req) {
 void craft_tcp_server::on_write(craft_conn& conn, wire::message const& req) {
     auto const wr = wire::decode< wire::write_req >(req.op_header);
     wire::status code = wire::status::ok;
+    lsn_pair lsns{};
     if (!session_active_) {
         code = wire::status::stale_term; // pre-LOGIN / post-LOGOUT IO is fenced
+        lsns = replica_->srv_lsns();
     } else {
         // The body IS the payload: empty => zero write; else the transport now owns these bytes, so copy
         // them into a buffer the journal slot adopts (the server-side equivalent of the model's one copy).
@@ -142,9 +149,13 @@ void craft_tcp_server::on_write(craft_conn& conn, wire::message const& req) {
         if (!req.body.empty()) bytes = std::make_shared< std::vector< uint8_t > >(req.body.begin(), req.body.end());
         client_hdr const hdr{session_term_, wr.hdr.commit_lsn, wr.hdr.all_committed_lsn};
         auto const r = replica_->srv_write(hdr, wr.dlsn, wr.addr, wr.len, std::move(bytes));
-        if (!r) code = to_wire_status(r.error());
+        if (!r) {
+            code = to_wire_status(r.error());
+            lsns = replica_->srv_lsns();
+        } else {
+            lsns = *r; // the ack's piggybacked watermarks, snapshotted atomically with the append
+        }
     }
-    auto const lsns = replica_->srv_lsns();
     LOGTRACE("craft_srv WR [rid:{}] dlsn={} addr={} len={} status={} commit_lsn={}", req.hdr.request_id, wr.dlsn,
              wr.addr, wr.len, static_cast< int >(code), lsns.commit_lsn);
     wire::write_rsp rsp{lsns.commit_lsn, lsns.last_append_lsn};
@@ -171,13 +182,15 @@ void craft_tcp_server::on_read(craft_conn& conn, wire::message const& req) {
         dest.size = rr.len;
         dest.iovs.push_back(iovec{dest_buf.data(), static_cast< std::size_t >(rr.len)});
         auto const r = replica_->srv_read(hdr, rr.read_lsn, rr.addr, rr.len, dest);
-        auto const lsns = replica_->srv_lsns();
-        rsp.commit_lsn = lsns.commit_lsn;
-        rsp.last_append_lsn = lsns.last_append_lsn;
         if (!r) {
             code = to_wire_status(r.error());
+            auto const lsns = replica_->srv_lsns();
+            rsp.commit_lsn = lsns.commit_lsn;
+            rsp.last_append_lsn = lsns.last_append_lsn;
         } else {
-            auto const& layout = *r;
+            rsp.commit_lsn = r->lsns.commit_lsn; // piggybacked, snapshotted atomically with the read
+            rsp.last_append_lsn = r->lsns.last_append_lsn;
+            auto const& layout = r->extents;
             rsp.extent_count = static_cast< uint32_t >(layout.size());
             for (auto const& e : layout) {
                 wire::extent_desc ed{};
@@ -197,6 +210,34 @@ void craft_tcp_server::on_read(craft_conn& conn, wire::message const& req) {
              rr.read_lsn, rr.addr, rr.len, static_cast< int >(code), rsp.extent_count, body.size());
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::read_rsp, static_cast< uint8_t >(code), req.hdr.request_id, as_bytes(rsp), body);
+    conn.send_all(out);
+}
+
+void craft_tcp_server::on_resolve(craft_conn& conn, wire::message const& req) {
+    auto const rr = wire::decode< wire::resolve_req >(req.op_header);
+    wire::resolve_rsp rsp{};
+    std::vector< uint8_t > body;
+    wire::status code = wire::status::ok;
+
+    if (!session_active_) {
+        code = wire::status::stale_term;
+    } else {
+        client_hdr const hdr{session_term_, rr.hdr.commit_lsn, rr.hdr.all_committed_lsn};
+        auto const r = replica_->srv_resolve(hdr, rr.upto); // N=1 semantics: every hole <= upto is Empty
+        if (!r) {
+            code = to_wire_status(r.error());
+        } else {
+            rsp.resolved_upto = r->resolved_upto;
+            rsp.empty_count = static_cast< uint32_t >(r->empty_slots.size());
+            for (auto const d : r->empty_slots)
+                wire::put(body, d);
+        }
+    }
+    LOGTRACE("craft_srv RS [rid:{}] upto={} status={} empties={}", req.hdr.request_id, rr.upto,
+             static_cast< int >(code), rsp.empty_count);
+    std::vector< uint8_t > out;
+    wire::frame_message(out, wire::op::resolve_rsp, static_cast< uint8_t >(code), req.hdr.request_id, as_bytes(rsp),
+                        body);
     conn.send_all(out);
 }
 

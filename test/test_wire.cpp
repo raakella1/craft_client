@@ -60,7 +60,7 @@ std::vector< uint8_t > frame(op o, uint8_t st, uint16_t rid, std::span< uint8_t 
 
 // The op-header size table matches the spec, and unknown ops are rejected.
 TEST(CraftWire, OpHeaderSizes) {
-    EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::login)), 8u);
+    EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::login)), 24u); // volume_id[16] + client_token
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::login_rsp)), 56u);
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::helo)), 32u);
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::helo_rsp)), 0u);
@@ -70,13 +70,43 @@ TEST(CraftWire, OpHeaderSizes) {
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::read_rsp)), 24u);
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::keepalive)), 16u);
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::logout)), 16u);
+    EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::resolve)), 24u);
+    EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::resolve_rsp)), 16u);
     EXPECT_FALSE(op_hdr_size(0).has_value());
-    EXPECT_FALSE(op_hdr_size(13).has_value());
+    EXPECT_FALSE(op_hdr_size(15).has_value());
     EXPECT_FALSE(op_hdr_size(99).has_value());
 
     EXPECT_TRUE(is_response(static_cast< uint8_t >(op::write_rsp)));
+    EXPECT_TRUE(is_response(static_cast< uint8_t >(op::resolve_rsp)));
     EXPECT_FALSE(is_response(static_cast< uint8_t >(op::write)));
+    EXPECT_FALSE(is_response(static_cast< uint8_t >(op::resolve)));
     EXPECT_FALSE(is_response(0));
+}
+
+// A RESOLVE round-trips: the watermark request and the Empty-verdict list survive frame -> parse -> decode.
+TEST(CraftWire, RoundTripResolve) {
+    resolve_req rq{{.commit_lsn = 5, .all_committed_lsn = 3}, /*upto*/ 9};
+    auto req_buf = frame(op::resolve, 0, /*rid*/ 3, bytes(rq), {});
+    auto req = parse_message(req_buf, kMaxTx);
+    ASSERT_TRUE(req.has_value());
+    auto const rq2 = decode< resolve_req >(req->op_header);
+    EXPECT_EQ(rq2.upto, 9);
+    EXPECT_EQ(rq2.hdr.commit_lsn, 5);
+
+    std::vector< int64_t > const empties{6, 8};
+    std::vector< uint8_t > body;
+    for (auto const d : empties)
+        put(body, d);
+    resolve_rsp rs{/*resolved_upto*/ 9, /*empty_count*/ 2, 0};
+    auto rsp_buf = frame(op::resolve_rsp, 0, /*rid*/ 3, bytes(rs), body);
+    auto rsp = parse_message(rsp_buf, kMaxTx);
+    ASSERT_TRUE(rsp.has_value());
+    auto const rs2 = decode< resolve_rsp >(rsp->op_header);
+    EXPECT_EQ(rs2.resolved_upto, 9);
+    auto const got = decode_lsns(rsp->body, rs2.empty_count);
+    ASSERT_TRUE(got.has_value());
+    EXPECT_EQ(*got, empties);
+    EXPECT_FALSE(decode_lsns(rsp->body, 100).has_value()); // truncated list is rejected
 }
 
 // A WRITE request round-trips: header fields and the payload survive frame -> parse -> decode.

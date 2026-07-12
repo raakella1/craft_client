@@ -16,6 +16,8 @@
 #include <craft/mem/cluster.hpp>
 
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <string>
 
 extern "C" {
@@ -57,8 +59,8 @@ MemTransport::delivery MemTransport::plan_delivery(std::chrono::milliseconds del
     return delivery{delay, std::chrono::milliseconds{0}, false};
 }
 
-async_status MemTransport::send_write(std::shared_ptr< MemCraftReplica > to, client_hdr hdr, int64_t dlsn,
-                                      uint64_t addr, uint64_t len, sisl::sg_list data) {
+async_result< lsn_pair > MemTransport::send_write(std::shared_ptr< MemCraftReplica > to, client_hdr hdr, int64_t dlsn,
+                                                  uint64_t addr, uint64_t len, sisl::sg_list data) {
     auto const id = to->id();
     // One acquire load, no lock: every check below reads the same consistent snapshot of THIS replica's knobs.
     auto const* rf = to->fault_snapshot();
@@ -99,9 +101,9 @@ async_status MemTransport::send_write(std::shared_ptr< MemCraftReplica > to, cli
     co_return to->do_write(hdr, dlsn, addr, len, std::move(bytes));
 }
 
-async_result< std::vector< io_extent > > MemTransport::send_read(std::shared_ptr< MemCraftReplica > to, client_hdr hdr,
-                                                                 int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                                 sisl::sg_list dest) {
+async_result< read_result > MemTransport::send_read(std::shared_ptr< MemCraftReplica > to, client_hdr hdr,
+                                                    int64_t read_lsn, uint64_t addr, uint64_t len,
+                                                    sisl::sg_list dest) {
     // No late delivery for a read: a result nobody is waiting for is worthless. A sub-quorum fault does not
     // gate reads either -- it drops writes.
     auto const id = to->id();
@@ -365,6 +367,56 @@ result< LoginResult > MemTransport::run_login(MemCraftReplica* caller, uint64_t 
     LoginResult lr{std::move(members_copy), rs, nt, lba_size_, capacity_};
     lr.max_tx = max_tx_; // convey the volume max transfer once, like lba_size / capacity
     return lr;
+}
+
+result< resolution_result > MemTransport::run_resolution(MemCraftReplica* caller, uint64_t term, int64_t upto) {
+    std::vector< MemCraftReplica* > live;
+    {
+        std::lock_guard< std::mutex > g{mu_};
+        if (!caller->is_up()) return fail(craft_error::REPLICA_DOWN);
+        if (caller->id() != leader_) return fail(craft_error::NOT_LEADER);
+        if (term != term_) return fail(craft_error::STALE_TERM); // fence a deposed client's round
+        live = live_replicas_locked();
+        if (live.size() < quorum(members_.size())) return fail(craft_error::NO_QUORUM);
+    }
+
+    // Everything <= a member's commit_lsn is contiguously present there, so the min over the live set bounds
+    // the scan: below it nothing can be unresolved.
+    int64_t floor = std::numeric_limits< int64_t >::max();
+    for (auto* r : live)
+        floor = std::min(floor, r->peek_lsns().commit_lsn);
+
+    for (int64_t d = floor + 1; d <= upto; ++d) {
+        // One pass over the live set: a prior Empty verdict is authoritative (it beats a held copy -- the
+        // copy was never acked); else any live holder's copy fills the others; else the whole live set
+        // (a quorum) positively lacks the slot and it is verdicted Empty everywhere.
+        std::optional< MemCraftReplica::MemJournalSlot > copy;
+        bool verdicted = false;
+        for (auto* r : live) {
+            if (auto s = r->peek_slot(d)) {
+                if (s->is_empty) {
+                    verdicted = true;
+                    break;
+                }
+                if (!copy) copy = std::move(s);
+            }
+        }
+        if (verdicted || !copy) {
+            for (auto* r : live)
+                r->cold_mark_empty(d);
+        } else {
+            for (auto* r : live) {
+                if (!r->peek_slot(d)) r->cold_install_slot(d, *copy);
+            }
+        }
+    }
+    for (auto* r : live)
+        r->cold_apply_sync(upto, 0);
+
+    // The verdict list comes off the LEADER's journal (it was marked in every round), so a client retiring a
+    // slot whose earlier round-reply was lost still learns its verdict. (The model never reclaims journal, so
+    // the leader's tombstones persist for the session.)
+    return resolution_result{upto, caller->peek_empties(upto)};
 }
 
 status MemTransport::run_logout(MemCraftReplica* caller, uint64_t term) {
