@@ -1,0 +1,14 @@
+# ThreadSanitizer suppression file for craft_client.
+# Known false positives. Format: race:<function substring>
+
+# sisl NamedCounter registration race (benign).
+#
+# craft::read_route_map holds one sisl::StreamTracker per replica, and each StreamTracker carries a
+# StreamTrackerMetrics whose constructor calls NamedCounter<name>::set_index() to record the counter's slot.
+# NamedCounter<name> is a GLOBAL Meyers singleton shared by every StreamTracker with the same counter name, so
+# building a second replica's route map (set_index, a write) races with an in-flight read updating an existing
+# one (get_index in StreamTracker::do_update). set_index writes the same index every registration (it is
+# idempotent) and get_index reads a plain uint64_t, so the value is always correct -- TSAN flags the
+# unsynchronized global, but there is no real hazard. This is a sisl-internal metrics characteristic, not a
+# craft_client bug (see the same race noted across the SDS stack).
+race:sisl::NamedCounter

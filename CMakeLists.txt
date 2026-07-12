@@ -91,3 +91,11 @@ craft_test_ownmain(test_client_tcp craft_reference)
 # white-box: these two reach the concrete craft_client + read_route_map (internal headers under src/)
 target_include_directories(test_client     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(test_client_tcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+# Under TSAN, point every test at the suppression file (a benign sisl NamedCounter / StreamTracker-metrics
+# registration race; see tsan.supp). Applied after all add_test() calls so it covers the whole suite.
+if((DEFINED THREAD_SANITIZER_ON) AND (${THREAD_SANITIZER_ON}))
+  get_property(_craft_tests DIRECTORY PROPERTY TESTS)
+  set_tests_properties(${_craft_tests} PROPERTIES
+    ENVIRONMENT "TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp")
+endif()
