@@ -93,9 +93,11 @@ target_include_directories(test_client     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/s
 target_include_directories(test_client_tcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Under TSAN, point every test at the suppression file (a benign sisl NamedCounter / StreamTracker-metrics
-# registration race; see tsan.supp). Applied after all add_test() calls so it covers the whole suite.
-if((DEFINED THREAD_SANITIZER_ON) AND (${THREAD_SANITIZER_ON}))
+# registration race; see tsan.supp). Applied after all add_test() calls so it covers the whole suite. The
+# EXISTS guard matters: TSAN treats a missing suppressions file as fatal and aborts EVERY test on startup, so a
+# path/packaging slip must degrade to "no suppression" (one truthful race failure), not "all tests fail".
+set(_craft_tsan_supp "${CMAKE_SOURCE_DIR}/tsan.supp")
+if((DEFINED THREAD_SANITIZER_ON) AND (${THREAD_SANITIZER_ON}) AND (EXISTS "${_craft_tsan_supp}"))
   get_property(_craft_tests DIRECTORY PROPERTY TESTS)
-  set_tests_properties(${_craft_tests} PROPERTIES
-    ENVIRONMENT "TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tsan.supp")
+  set_tests_properties(${_craft_tests} PROPERTIES ENVIRONMENT "TSAN_OPTIONS=suppressions=${_craft_tsan_supp}")
 endif()

@@ -1,5 +1,7 @@
 # craft_client -- the CRAFT reference client, wire protocol, and reference model
 
+[![Conan Build](https://github.com/szmyd/craft_client/actions/workflows/build_commit.yml/badge.svg?branch=dev/v0.x)](https://github.com/szmyd/craft_client/actions/workflows/build_commit.yml)
+
 A **standalone, transport-agnostic, storage-engine-free** package for the client half of **CRAFT**
 (Client Assisted RAFT), the replication protocol for HomeBlocks block volumes. Extracted from HomeBlocks so
 it can be embedded anywhere: HomeBlocks depends *back* on it, and ublkpp's `craft_disk` driver drives it to

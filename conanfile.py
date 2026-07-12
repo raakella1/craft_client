@@ -29,7 +29,7 @@ class CraftClientConan(ConanFile):
         "sanitize": "False",
     }
 
-    exports_sources = ("CMakeLists.txt", "cmake/*", "include/*", "src/*", "test/*", "LICENSE")
+    exports_sources = ("CMakeLists.txt", "cmake/*", "include/*", "src/*", "test/*", "tsan.supp", "LICENSE")
 
     def configure(self):
         if self.options.shared:
