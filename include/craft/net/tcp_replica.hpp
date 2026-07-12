@@ -17,7 +17,7 @@
 // CraftTcpReplica: the client-side transport adapter -- a craft_replica implemented over the wire-only
 // craft_tcp_client. It is the initiator: craft_client holds N of these (or N MemCraftReplicas for the no-wire
 // tier) and never knows the difference, exactly like a RAID1/iSCSI split. Every wire reply is mapped here to
-// the homeblocks domain result (LSNPair / io_extent / craft_error); the client speaks only the interface.
+// the homeblocks domain result (lsn_pair / io_extent / craft_error); the client speaks only the interface.
 //
 // CONCURRENCY BRIDGE. craft_client fans a write out to every replica and acks at QUORUM, leaving stragglers
 // detached -- so the per-replica ops must run concurrently. craft_tcp_client is blocking, so each op hops onto
@@ -50,6 +50,10 @@
 
 namespace craft {
 
+namespace net {
+class craft_async_conn; // the on-ring data path (src/net/async_conn.hpp); held behind a unique_ptr, opened lazily
+}
+
 class CraftTcpReplica final : public craft_replica {
 public:
     // Address the replica at host:port; `id` is its endpoint id (routing), `volume_id` is what HELO presents
@@ -75,11 +79,17 @@ public:
     async_status write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data) override;
     async_result< std::vector< io_extent > > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
                                                   sisl::sg_list dest) override;
-    async_result< LSNPair > keep_alive(client_hdr hdr) override;
+    async_result< lsn_pair > keep_alive(client_hdr hdr) override;
+
+    // Prime the ON-RING data path: store the caller's ring. Just a pointer -- raw fds, no IOSQE_FIXED_FILE, so the
+    // data connection (craft_async_conn) is opened lazily on it at the first write/read/keep_alive and reconnected
+    // at will. login/logout stay on the blocking worker path (they ran before any ring existed, to yield
+    // lba/capacity/term); only the data path moves onto the ring.
+    void prepare_for_async(::io_uring* ring) noexcept override { ring_ = ring; }
 
     // ── craft_replica: peer-facing (server-to-server; a client never invokes these) -- stubbed NOT_LEADER ──
-    async_result< LSNPair > get_lsns() override;
-    async_result< LSNPair > get_rs_commit_lsn() override;
+    async_result< lsn_pair > get_lsns() override;
+    async_result< lsn_pair > get_rs_commit_lsn() override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
     async_status truncate(int64_t lsn) override;
     peer_id_t id() const override { return id_; }
@@ -106,7 +116,17 @@ private:
     std::array< uint8_t, 16 > vol_id_;
     std::chrono::milliseconds op_timeout_{0}; // forwarded onto conn_ at connect; 0 = block forever
 
-    net::craft_tcp_client conn_; // touched ONLY on the worker thread
+    net::craft_tcp_client conn_; // touched ONLY on the worker thread (login/logout: the blocking admin path)
+
+    // The ON-RING data path (prepare_for_async): the caller's ring + a lazily-opened async connection over it.
+    // Null ring_ => not primed => write/read/keep_alive take the blocking conn_ path above. Opened/torn down on
+    // the caller's (queue) thread, so no lock; its dtor is defined in the .cpp where craft_async_conn is complete.
+    ::io_uring* ring_{nullptr};
+    std::unique_ptr< net::craft_async_conn > aconn_;
+    uint32_t max_tx_{
+        wire::k_default_max_tx}; // the volume max transfer PAYLOAD; a safe ceiling until login learns it from login_rsp
+    uint32_t lba_{0};            // the volume block size (login_rsp); with max_tx_ it sizes the on-ring parse bound
+                                 // (wire::framed_body_max: payload + a read reply's extent table)
     bool connected_{false};
     bool bound_{false};
     uint64_t bound_term_{0}; // the session term this connection is bound at; a new term forces a re-HELO

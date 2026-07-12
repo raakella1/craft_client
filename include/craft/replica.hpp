@@ -31,6 +31,8 @@
 #include <craft/client.hpp> // client_handle (the opaque handle make_client returns)
 #include <craft/types.hpp>  // the CRAFT vocabulary + the result / async_result aliases
 
+struct io_uring; // liburing (fwd-decl only: the on-ring data-path seam is a pointer, see prepare_for_async)
+
 namespace craft {
 
 // ── internal / peer-only data types (deliberately NOT on the public client surface) ──
@@ -43,6 +45,12 @@ struct CraftPartitionState {
     uint64_t client_token{0};    // token from the last successful InternalLogin
     uint64_t term{0};            // current session term
 };
+
+// Block-addressing units for the replica-side journal/index representation. The CRAFT client API and wire are
+// byte-based (raw uint64_t addr/len); only JournalSlot (below) and the reference model's per-block index speak
+// these block units, so they live here with the peer/journal types, not in the client vocab (craft/types.hpp).
+using lba_t = uint64_t;
+using lba_count_t = uint32_t;
 
 // One journal slot returned by fetch_data() (server-to-server resync; not client-facing). Four-way:
 // data (is_empty=false, all_zeros=false), zero write (all_zeros=true, no data), Empty (is_empty=true),
@@ -88,14 +96,22 @@ public:
     // Advance the frontier toward hdr.commit_lsn + reset the client-liveness watchdog -- which is WHY
     // it is term-fenced: a stale client must not be able to keep the session alive. Returns the
     // achieved {commit_lsn, last_append_lsn}. No standalone commit verb; keep_alive is its carrier.
-    virtual async_result< LSNPair > keep_alive(client_hdr hdr) = 0;
+    virtual async_result< lsn_pair > keep_alive(client_hdr hdr) = 0;
+
+    // Bind this backend's data path to a host io_uring `ring` (a ublk queue's, or a test's) for on-ring async
+    // completion. Called once per ring, OFF the IO path (never concurrently with an in-flight op). Default
+    // no-op: transports that don't submit on a caller-provided ring (the worker-thread TCP client, the
+    // in-process reference over its own pool) ignore it and keep their existing completion source. After this,
+    // write/read/keep_alive submit their SQEs on `ring` and complete via sisl::async::cqe_state, which the ring
+    // owner's reap loop dispatches -- so many ops go in flight at once (QD>1) on the caller's thread.
+    virtual void prepare_for_async(::io_uring* /*ring*/) noexcept {}
 
     // ── peer-facing (server-to-server; driven by the cold path / resync, never by a client) ──
 
     // Snapshot {commit_lsn, last_append_lsn} for this replica -- used by the leader during
     // GetRSCommitLSN polls and SyncRSCommitLSN rounds; identical to what keep_alive returns.
-    virtual async_result< LSNPair > get_lsns() = 0;
-    virtual async_result< LSNPair > get_rs_commit_lsn() = 0;
+    virtual async_result< lsn_pair > get_lsns() = 0;
+    virtual async_result< lsn_pair > get_rs_commit_lsn() = 0;
     virtual async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) = 0;
     virtual async_status truncate(int64_t lsn) = 0;
 

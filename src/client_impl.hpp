@@ -47,9 +47,11 @@ public:
     async_status flush();
     async_status logout();
     void drive_keepalives(std::size_t exclude_idx);
+    void prepare_for_async(::io_uring* ring); // fan out the ring to every backend's on-ring data path
 
     uint32_t lba_size() const { return lba_size_; }
     uint64_t capacity() const { return capacity_; }
+    uint32_t max_tx() const { return max_tx_; }
     uint64_t term() const { return term_; }
     int64_t commit_lsn() const { return tracker_.frontier(); }
     int64_t read_horizon() const { return tracker_.read_horizon(); }
@@ -73,6 +75,7 @@ private:
     uint64_t term_{0};
     uint32_t lba_size_{0};
     uint64_t capacity_{0};
+    uint32_t max_tx_{0};
 
     dlsn_tracker tracker_;
     // shared_ptr, not a plain member: a detached when_quorum straggler's completion hook records into this map

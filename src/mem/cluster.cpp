@@ -118,7 +118,7 @@ async_result< std::vector< io_extent > > MemTransport::send_read(std::shared_ptr
     co_return to->do_read(hdr, read_lsn, addr, len, std::move(dest));
 }
 
-async_result< LSNPair > MemTransport::send_keep_alive(std::shared_ptr< MemCraftReplica > to, client_hdr hdr) {
+async_result< lsn_pair > MemTransport::send_keep_alive(std::shared_ptr< MemCraftReplica > to, client_hdr hdr) {
     auto const id = to->id();
     auto const* rf = to->fault_snapshot();
     if (!rf->up) co_return fail(craft_error::REPLICA_DOWN);
@@ -134,10 +134,11 @@ async_result< LSNPair > MemTransport::send_keep_alive(std::shared_ptr< MemCraftR
 }
 
 MemTransport::MemTransport(std::vector< replica_endpoint > members, uint32_t lba_size, std::size_t threads_per_replica,
-                           uint64_t capacity) :
+                           uint64_t capacity, uint32_t max_tx) :
         members_{std::move(members)},
         lba_size_{lba_size},
         capacity_{capacity},
+        max_tx_{max_tx},
         threads_per_replica_{std::max< std::size_t >(1, threads_per_replica)} {
     if (!members_.empty()) leader_ = members_.front().id;
     // Built once, never rehashed, so a replica_service* handed out by service_for() stays stable for life.
@@ -361,7 +362,9 @@ result< LoginResult > MemTransport::run_login(MemCraftReplica* caller, uint64_t 
     for (auto* r : live) {
         if (r->peek_lsns().last_append_lsn > rs) r->cold_truncate_above(rs);
     }
-    return LoginResult{std::move(members_copy), rs, nt, lba_size_, capacity_};
+    LoginResult lr{std::move(members_copy), rs, nt, lba_size_, capacity_};
+    lr.max_tx = max_tx_; // convey the volume max transfer once, like lba_size / capacity
+    return lr;
 }
 
 status MemTransport::run_logout(MemCraftReplica* caller, uint64_t term) {
@@ -391,13 +394,13 @@ peer_id_t mem_replica_id(volume_id_t vol_id, uint32_t index) {
 }
 
 MemReplicaGroup make_mem_replica_group(volume_id_t vol_id, uint32_t n, uint32_t page_size,
-                                       std::size_t threads_per_replica, uint64_t capacity) {
+                                       std::size_t threads_per_replica, uint64_t capacity, uint32_t max_tx) {
     std::vector< replica_endpoint > members;
     members.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
         members.push_back(replica_endpoint{mem_replica_id(vol_id, i), "mem://replica-" + std::to_string(i)});
     }
-    auto net = std::make_shared< MemTransport >(members, page_size, threads_per_replica, capacity);
+    auto net = std::make_shared< MemTransport >(members, page_size, threads_per_replica, capacity, max_tx);
     MemReplicaGroup group;
     group.net = net;
     group.replicas.reserve(n);

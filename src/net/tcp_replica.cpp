@@ -21,6 +21,8 @@
 
 #include <craft/status.hpp> // status_to_error (the shared wire <-> craft_error bridge)
 
+#include "net/async_conn.hpp" // the on-ring data path (internal); its dtor is emitted here where it is complete
+
 namespace craft {
 
 namespace {
@@ -161,6 +163,8 @@ async_result< LoginResult > CraftTcpReplica::login(uint64_t client_token) {
     if (!ensure_connected()) co_return fail(craft_error::REPLICA_DOWN);
     auto r = conn_.login(client_token);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
+    if (r->max_tx) max_tx_ = r->max_tx;  // the volume's max transfer PAYLOAD (login_rsp)
+    if (r->lba_size) lba_ = r->lba_size; // block size; with max_tx_ it sizes the on-ring parse bound (framed_body_max)
 
     if (r->term > 0) { // a successful login binds this (leader) connection at its term; a redirect does not
         bound_ = true;
@@ -171,6 +175,7 @@ async_result< LoginResult > CraftTcpReplica::login(uint64_t client_token) {
     out.term = r->term;
     out.lba_size = r->lba_size;
     out.capacity = r->capacity; // wire login_rsp already carried it; surface it instead of dropping it
+    out.max_tx = r->max_tx;     // ditto: the volume max transfer, conveyed once via login
     std::memcpy(&out.leader_hint, r->leader_hint.data(), 16);
     out.members.reserve(r->members.size());
     for (auto const& m : r->members) {
@@ -206,6 +211,18 @@ async_status CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr,
             payload.insert(payload.end(), p, p + iov.iov_len);
         }
     }
+    if (ring_) { // ── on-ring data path: lazily HELO the data fd at hdr.term, then send over the caller's ring ──
+        if (!aconn_)
+            aconn_ =
+                std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
+        if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+            co_return std::unexpected(net_to_error(e.error()));
+        auto r = co_await aconn_->write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
+        if (!r) co_return std::unexpected(net_to_error(r.error()));
+        if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
+        co_return ok();
+    }
+
     auto ev = hop();
     co_await *ev;
     if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
@@ -217,11 +234,8 @@ async_status CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr,
 
 async_result< std::vector< io_extent > > CraftTcpReplica::read(client_hdr hdr, int64_t read_lsn, uint64_t addr,
                                                                uint64_t len, sisl::sg_list dest) {
-    auto ev = hop();
-    co_await *ev;
-    if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
-
-    // Single-iovec dest: fill it in place. Otherwise read into scratch and scatter into the dest iovecs.
+    // Single-iovec dest: fill it in place. Otherwise read into scratch and scatter into the dest iovecs. Pure
+    // span math -- safe on the caller's thread before either path suspends.
     bool const inplace = dest.iovs.size() == 1 && dest.iovs[0].iov_len >= len;
     std::vector< uint8_t > scratch;
     std::span< uint8_t > d;
@@ -231,9 +245,26 @@ async_result< std::vector< io_extent > > CraftTcpReplica::read(client_hdr hdr, i
         scratch.resize(len);
         d = {scratch.data(), len};
     }
-    auto r = conn_.read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
-    if (!r) co_return std::unexpected(on_net_fault(r.error()));
-    if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
+
+    net::read_reply reply;
+    if (ring_) { // ── on-ring data path ──
+        if (!aconn_)
+            aconn_ =
+                std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
+        if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+            co_return std::unexpected(net_to_error(e.error()));
+        auto r = co_await aconn_->read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
+        if (!r) co_return std::unexpected(net_to_error(r.error()));
+        reply = std::move(*r);
+    } else {
+        auto ev = hop();
+        co_await *ev;
+        if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
+        auto r = conn_.read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
+        if (!r) co_return std::unexpected(on_net_fault(r.error()));
+        reply = std::move(*r);
+    }
+    if (reply.status != wire::status::ok) co_return std::unexpected(status_to_error(reply.status));
 
     if (!inplace) { // scatter the contiguous result into the caller's iovecs
         std::size_t off = 0;
@@ -244,23 +275,35 @@ async_result< std::vector< io_extent > > CraftTcpReplica::read(client_hdr hdr, i
             if (off >= len) break;
         }
     }
-    co_return to_io_extents(r->extents);
+    co_return to_io_extents(reply.extents);
 }
 
-async_result< LSNPair > CraftTcpReplica::keep_alive(client_hdr hdr) {
+async_result< lsn_pair > CraftTcpReplica::keep_alive(client_hdr hdr) {
+    if (ring_) { // ── on-ring data path ──
+        if (!aconn_)
+            aconn_ =
+                std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
+        if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+            co_return std::unexpected(net_to_error(e.error()));
+        auto r = co_await aconn_->keep_alive(hdr.commit_lsn, hdr.all_committed_lsn);
+        if (!r) co_return std::unexpected(net_to_error(r.error()));
+        if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
+        co_return lsn_pair{r->commit_lsn, r->last_append_lsn};
+    }
+
     auto ev = hop();
     co_await *ev;
     if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
     auto r = conn_.keep_alive(hdr.commit_lsn, hdr.all_committed_lsn);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
     if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
-    co_return LSNPair{r->commit_lsn, r->last_append_lsn};
+    co_return lsn_pair{r->commit_lsn, r->last_append_lsn};
 }
 
 // ── peer-facing: a client never invokes these; stubbed so the vtable is complete ──
 
-async_result< LSNPair > CraftTcpReplica::get_lsns() { co_return fail(craft_error::NOT_LEADER); }
-async_result< LSNPair > CraftTcpReplica::get_rs_commit_lsn() { co_return fail(craft_error::NOT_LEADER); }
+async_result< lsn_pair > CraftTcpReplica::get_lsns() { co_return fail(craft_error::NOT_LEADER); }
+async_result< lsn_pair > CraftTcpReplica::get_rs_commit_lsn() { co_return fail(craft_error::NOT_LEADER); }
 async_result< std::vector< JournalSlot > > CraftTcpReplica::fetch_data(std::vector< int64_t >) {
     co_return fail(craft_error::NOT_LEADER);
 }

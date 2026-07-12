@@ -63,6 +63,11 @@ async_status craft_client::login(uint64_t client_token) {
         term_ = lr->term;
         lba_size_ = lr->lba_size;
         capacity_ = lr->capacity;
+        // max_tx is the volume's max DATA transfer (like iSCSI's 512 KiB payload, header excluded). A driver caps
+        // its device IO to it directly -- a write of max_tx is pure data (no framing). The read-reply framing
+        // (extent table on top of the data) lives in the PARSE bound instead (parse_message allows body_len a
+        // margin over max_tx), so the payload stays the clean number.
+        max_tx_ = lr->max_tx;
         tracker_.reset_at(lr->dLSN, lr->lba_size);
         // Seed the router for this session: everything <= the login dLSN is universally held (the login
         // SyncRSCommitLSN barrier). Install a FRESH map rather than resetting in place: a detached straggler
@@ -251,6 +256,14 @@ void craft_client::drive_keepalives(std::size_t exclude_idx) {
     }
 }
 
+void craft_client::prepare_for_async(::io_uring* ring) {
+    // Off-path fan-out: hand the host ring to every backend. Each decides for itself whether it can submit on
+    // it (the mem model + the on-ring TCP proxy do; a worker-thread transport keeps its own completion source).
+    for (auto& r : replicas_) {
+        if (r) r->prepare_for_async(ring);
+    }
+}
+
 async_status craft_client::flush() {
     // keep_alive is CRAFT's commit carrier AND how the client learns each member's achieved commit_lsn.
     // Broadcast it to EVERY replica: feed each reply to the router, which advances that member's synced_ -> the
@@ -258,7 +271,7 @@ async_status craft_client::flush() {
     // down/errored member is skipped: its synced_ stays put, correctly pinning the floor. Succeeds if any answered.
     std::size_t const n = replicas_.size();
     client_hdr const hdr = make_hdr();
-    std::vector< async_result< LSNPair > > futs;
+    std::vector< async_result< lsn_pair > > futs;
     futs.reserve(n);
     for (auto& h : replicas_)
         futs.push_back(h->keep_alive(hdr));
@@ -294,6 +307,7 @@ async_status craft_client::logout() {
             term_ = 0;
             lba_size_ = 0;
             capacity_ = 0;
+            max_tx_ = 0;
             co_return ok();
         }
         last_err = r.error();
@@ -301,6 +315,7 @@ async_status craft_client::logout() {
             term_ = 0; // already fenced elsewhere; the session is gone
             lba_size_ = 0;
             capacity_ = 0;
+            max_tx_ = 0;
             co_return ok();
         }
         // NOT_LEADER (redirect) or REPLICA_DOWN: try the next replica.
@@ -325,9 +340,11 @@ async_result< size_t > read(client_handle const& c, uint64_t addr, uint64_t len,
 async_status flush(client_handle const& c) { return c->flush(); }
 async_status logout(client_handle const& c) { return c->logout(); }
 void drive_keepalives(client_handle const& c, std::size_t exclude_idx) { c->drive_keepalives(exclude_idx); }
+void prepare_for_async(client_handle const& c, ::io_uring* ring) { c->prepare_for_async(ring); }
 
 uint32_t lba_size(client_handle const& c) { return c->lba_size(); }
 uint64_t capacity(client_handle const& c) { return c->capacity(); }
+uint32_t max_tx(client_handle const& c) { return c->max_tx(); }
 uint64_t term(client_handle const& c) { return c->term(); }
 int64_t commit_lsn(client_handle const& c) { return c->commit_lsn(); }
 int64_t read_horizon(client_handle const& c) { return c->read_horizon(); }

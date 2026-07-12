@@ -38,6 +38,13 @@
 
 namespace craft::wire {
 
+// The default volume max transfer in bytes: the largest single CRAFT IO PAYLOAD (data only, like iSCSI's 512 KiB
+// payload with the header excluded) -- the number the reference model configures, that login conveys, and that a
+// driver caps its device IO to. A real volume's max_tx (login_rsp / LoginResult) overrides it; this is the ONE
+// definition so no layer re-picks it. The transport frames MORE than this (see framed_body_max) but the payload
+// stays the clean advertised number.
+constexpr uint32_t k_default_max_tx = 512 * 1024;
+
 // The structs below are laid out to match the little-endian wire, so a receiver reinterprets the buffer as a
 // struct and reads fields directly. That is only correct on a little-endian host (every target is x86-64 /
 // ARM64-LE); a big-endian build would need explicit byte swaps and is refused here rather than silently
@@ -145,6 +152,17 @@ struct extent_desc {
     uint8_t hole; // 1 = hole (reads as zero, no bytes in the body); 0 = data
     uint8_t reserved[7];
 };
+
+// The largest message BODY the transport must frame/parse for a `payload`-byte IO at block size `lba`. A write
+// request body is just the payload; a read REPLY body is the extent table -- worst case one extent_desc per block
+// (fully fragmented, all data) -- laid down BEFORE the data. So a payload-sized read reads back as payload plus
+// that table, exceeding the payload itself. The transport adds this headroom to its parse bound / recv buffers so
+// a full-payload read still fits, while max_tx (the payload) stays the clean number advertised to drivers. Both
+// peers derive it from the payload agreed at login, so there is nothing extra to negotiate. lba==0 -> no headroom.
+constexpr uint32_t framed_body_max(uint32_t payload, uint32_t lba) {
+    uint32_t const blocks = (lba == 0) ? 0u : (payload + lba - 1u) / lba;
+    return payload + blocks * static_cast< uint32_t >(sizeof(extent_desc));
+}
 
 struct keepalive_req {
     req_hdr hdr;

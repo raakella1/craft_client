@@ -135,7 +135,7 @@ Response operation header (56 bytes):
 | 8 | 8 | `dLSN` (i64) | starting per-partition LSN for new IO |
 | 16 | 8 | `capacity` (u64) | volume size in bytes -- the device size presented to ublk |
 | 24 | 4 | `lba_size` (u32) | block size in bytes; alignment unit for addr/len |
-| 28 | 4 | `max_tx` (u32) | largest single transfer in bytes; caps ublk max_sectors and any `body_len` |
+| 28 | 4 | `max_tx` (u32) | largest single IO **payload** (data) in bytes; caps ublk max_sectors. A READ_RSP frames its extent table on top of this, so it does not bound `body_len` directly -- see *Sizing and limits* |
 | 32 | 4 | `member_count` (u32) | number of member descriptors in the body |
 | 36 | 4 | reserved (0) | |
 | 40 | 16 | `leader_hint` (uuid) | non-nil iff redirect (term == 0); nil on success |
@@ -326,9 +326,21 @@ negotiation.
 
 ## Sizing and limits
 
-One ublk IO is one wire message, and ublk already bounds a single transfer at `max_sectors` (derived from
-`max_tx`). So `body_len` is always `<= max_tx`; a receiver MUST reject a larger `body_len` with
-`INVALID_ARGUMENT` to bound its buffer. There is no application-level fragmentation or reassembly.
+`max_tx` is the volume's largest single IO **payload** -- the data of one transfer, the number `LOGIN_RSP`
+carries and a driver caps `max_sectors` to (iSCSI's 512 KiB payload with the header excluded is the analogue).
+It is **not** a bound on `body_len`. A `WRITE` request body is pure payload, so its `body_len <= max_tx`; but a
+`READ_RSP` body is the extent table **then** the data, so a full-payload read frames a body of `max_tx` data
+plus one `extent_desc` per block (worst case, a fully fragmented read). The transport therefore bounds a body at
+
+```
+framed_body_max(max_tx, lba_size) = max_tx + ceil(max_tx / lba_size) * sizeof(extent_desc)
+```
+
+-- the payload plus the largest extent table a read of it can carry (e.g. 512 KiB + 3 KiB = 515 KiB at a 4 KiB
+block). Both peers derive that bound from the payload agreed at `LOGIN`, so nothing extra is negotiated. A
+receiver MUST reject a `body_len` over the bound it applies -- a server bounds a request at `max_tx` (requests
+carry no extents), a client bounds a reply at `framed_body_max` -- to cap its buffer. There is no
+application-level fragmentation or reassembly.
 
 ## Not covered yet
 

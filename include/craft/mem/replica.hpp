@@ -127,11 +127,19 @@ public:
     async_status write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data) override;
     async_result< std::vector< io_extent > > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
                                                   sisl::sg_list dest) override;
-    async_result< LSNPair > keep_alive(client_hdr hdr) override;
+    async_result< lsn_pair > keep_alive(client_hdr hdr) override;
+
+    // On-ring data path: bind write/read/keep_alive to `ring` so their delivery timer is a ring SQE the ring
+    // owner's reap loop completes (many legs in flight at once, QD>1, on the caller's thread) instead of a
+    // MemTransport pool hop. A null ring (the default) keeps the existing pool path. The CALLER owns the reap
+    // loop: after this, it MUST drain the ring's CQEs (dispatch each managed one via
+    // sisl::async::complete_cqe_state) -- including the detached straggler legs -- or the submitted SQEs never
+    // fire and the ops hang. See craft_replica::prepare_for_async.
+    void prepare_for_async(::io_uring* ring) noexcept override;
 
     // ── craft_replica: peer-facing (driven by MemTransport) ──
-    async_result< LSNPair > get_lsns() override;
-    async_result< LSNPair > get_rs_commit_lsn() override;
+    async_result< lsn_pair > get_lsns() override;
+    async_result< lsn_pair > get_rs_commit_lsn() override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
     async_status truncate(int64_t lsn) override;
     peer_id_t id() const override { return ep_.id; }
@@ -152,10 +160,10 @@ public:
                                                 sisl::sg_list dest) {
         return do_read(hdr, read_lsn, addr, len, std::move(dest));
     }
-    result< LSNPair > srv_keep_alive(client_hdr hdr) { return do_keep_alive(hdr); }
+    result< lsn_pair > srv_keep_alive(client_hdr hdr) { return do_keep_alive(hdr); }
     void srv_establish(uint64_t client_token, uint64_t term) { cold_apply_login(client_token, term); }
     void srv_end() { cold_apply_logout(); }
-    LSNPair srv_lsns() { return peek_lsns(); }
+    lsn_pair srv_lsns() { return peek_lsns(); }
 
 private:
     friend class MemTransport; // the cold path drives the cold_* / peek helpers below directly, and the IO
@@ -191,10 +199,19 @@ private:
                     std::shared_ptr< std::vector< uint8_t > > bytes);
     result< std::vector< io_extent > > do_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
                                                sisl::sg_list dest);
-    result< LSNPair > do_keep_alive(client_hdr hdr);
-    result< LSNPair > do_lsns();
+    result< lsn_pair > do_keep_alive(client_hdr hdr);
+    result< lsn_pair > do_lsns();
     status do_truncate(int64_t lsn);
     result< std::vector< JournalSlot > > do_fetch(std::vector< int64_t > const& lsns);
+
+    // ── on-ring transport (prepare_for_async) ──
+    // ring_delay suspends the calling leg on a timeout/nop SQE placed on ring_; the reap loop's
+    // complete_cqe_state resumes it. late_write is the detached straggler leg: a write whose delay ran past the
+    // client deadline lands here, late, after its own ring timer -- exactly the arrival that leaves a Missing
+    // slot behind at QD>1. `this` outlives it because the driver drains every ring timer before teardown.
+    async_status ring_delay(std::chrono::milliseconds d);
+    async_status late_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                            std::shared_ptr< std::vector< uint8_t > > bytes, std::chrono::milliseconds deliver);
 
     // helpers (mu_ held by caller)
 
@@ -205,7 +222,7 @@ private:
     MemJournalSlot const* highest_slot_le(lba_t x, int64_t H) const; // journal-tail slot, honoring the horizon clamp
 
     // cold-path hooks used by MemTransport (each takes mu_)
-    LSNPair peek_lsns();
+    lsn_pair peek_lsns();
     void cold_apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
     void cold_apply_login(uint64_t client_token, uint64_t term);
     void cold_apply_logout();
@@ -227,6 +244,8 @@ private:
     replica_endpoint ep_;
     uint32_t page_size_;
     std::shared_ptr< MemTransport > net_;
+    ::io_uring* ring_{nullptr}; // prepare_for_async: the driver-owned ring the on-ring data path submits on
+
     CraftPartitionState state_;
     std::map< int64_t, MemJournalSlot > journal_; // dLSN -> slot (out-of-order arrival tolerated)
     std::map< lba_t, IndexCell > index_;          // applied prefix (<= commit_lsn); an absent LBA is a hole

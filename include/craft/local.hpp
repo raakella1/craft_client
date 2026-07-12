@@ -34,6 +34,7 @@
 
 #include <craft/replica.hpp> // craft_replica + make_client
 #include <craft/types.hpp>   // volume_id_t
+#include <craft/wire.hpp>    // wire::k_default_max_tx (the single-sourced volume max-transfer default)
 
 namespace craft {
 
@@ -42,9 +43,11 @@ class local_cluster;
 using local_cluster_handle = std::shared_ptr< local_cluster >;
 
 // N reference replicas serving `vol_id` at `page_size` bytes/block (index 0 is the default leader). `capacity`
-// is the volume size in bytes reported at login (the device geometry a driver sizes from).
+// is the volume size in bytes reported at login (the device geometry a driver sizes from); `max_tx` is the
+// volume's max transfer, likewise conveyed at login (a driver caps its device IO to it).
 local_cluster_handle make_local_cluster(volume_id_t vol_id, uint32_t n = 3, uint32_t page_size = 4096,
-                                        uint64_t capacity = uint64_t{1} << 30);
+                                        uint64_t capacity = uint64_t{1} << 30,
+                                        uint32_t max_tx = wire::k_default_max_tx);
 
 // The backends to hand to make_client(); index 0 is the leader. Valid until the last handle is dropped.
 std::vector< std::shared_ptr< craft_replica > > const& backends(local_cluster_handle const& c);

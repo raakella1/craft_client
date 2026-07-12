@@ -19,6 +19,11 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <system_error>
+
+#include <liburing.h>               // the on-ring data path: SQE prep / user_data
+#include <sisl/async/cqe_state.hpp> // sisl::async::cqe_awaitable + the managed-user_data contract the reap loop shares
+#include <sisl/async/coro.hpp>      // sisl::async::detach (the straggler's late-delivery leg)
 
 namespace craft {
 
@@ -30,6 +35,18 @@ bool all_zero(uint8_t const* p, std::size_t n) {
     return true;
 }
 auto fail(craft_error e) { return std::unexpected(make_error_condition(e)); }
+
+// Serialize an sg_list into an owned buffer AT ISSUE -- the transport contract that lets the client recycle its
+// buffer once every replica leg has started (mirrors MemTransport::take_payload; a zero write carries none).
+std::shared_ptr< std::vector< uint8_t > > take_payload(sisl::sg_list const& s) {
+    auto b = std::make_shared< std::vector< uint8_t > >();
+    b->reserve(s.size);
+    for (auto const& io : s.iovs) {
+        auto const* p = static_cast< uint8_t const* >(io.iov_base);
+        b->insert(b->end(), p, p + io.iov_len);
+    }
+    return b;
+}
 } // namespace
 
 MemCraftReplica::MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net) :
@@ -83,23 +100,109 @@ async_status MemCraftReplica::logout(client_hdr hdr) {
     }
     co_return net_ ? net_->run_logout(this, hdr.term) : ok();
 }
-// Every client-facing op crosses the wire (MemTransport), which owns the payload, decides deliverability, and
-// imposes latency. What is left below is the server: journal + index. Nothing here copies bytes.
+// Two data paths behind one interface, chosen by whether a ring is bound (prepare_for_async). Legacy (ring_
+// null): every op crosses the wire (MemTransport), which owns the payload, decides deliverability, and imposes
+// latency -- the code below is just the server (journal + index) and copies nothing. On-ring: the SAME delivery
+// model, but this file owns the payload copy + delivery timer and submits it as an SQE on the driver's ring, so
+// N legs run in flight at once and complete on the driver's reap thread.
 async_status MemCraftReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data) {
     if (!net_) co_return fail(craft_error::NO_QUORUM); // no wire, nothing to deliver over
-    co_return co_await net_->send_write(shared_from_this(), hdr, dlsn, addr, len, std::move(data));
+    if (!ring_) co_return co_await net_->send_write(shared_from_this(), hdr, dlsn, addr, len, std::move(data));
+
+    // ── on-ring path: the SAME delivery model as MemTransport::send_write, but the timer is a ring SQE the
+    //    driver's reap loop completes -- so N replica legs sit in flight at once (QD>1) on the caller's thread. ──
+    auto const* rf = fault_snapshot();
+    if (!rf->up || !rf->write_ok) co_return fail(craft_error::REPLICA_DOWN); // never delivered (deterministic reject)
+    auto bytes = (data.size == 0) ? nullptr : take_payload(data);            // serialize at issue (transport contract)
+
+    // plan_delivery inlined: a delay past the client deadline abandons THIS leg at op_timeout but still lands the
+    // write late (detached) at `delay` -- the arrival that leaves a Missing slot behind at QD>1.
+    auto const op_to = net_->op_timeout();
+    auto const delay = rf->delay;
+    if (delay.count() > 0 && op_to.count() > 0 && delay >= op_to) {
+        sisl::async::detach(late_write(hdr, dlsn, addr, len, std::move(bytes), delay));
+        co_await ring_delay(op_to);
+        co_return std::unexpected(std::make_error_condition(std::errc::timed_out));
+    }
+    co_await ring_delay(delay); // always suspends (0 delay => one reap cycle), as the wire's reply must
+    auto const* rf2 = fault_snapshot();
+    if (!rf2->up || !rf2->write_ok) co_return fail(craft_error::REPLICA_DOWN); // went unreachable in flight
+    co_return do_write(hdr, dlsn, addr, len, std::move(bytes));
 }
 async_result< std::vector< io_extent > > MemCraftReplica::read(client_hdr hdr, int64_t read_lsn, uint64_t addr,
                                                                uint64_t len, sisl::sg_list dest) {
     if (!net_) co_return fail(craft_error::NO_QUORUM);
-    co_return co_await net_->send_read(shared_from_this(), hdr, read_lsn, addr, len, std::move(dest));
+    if (!ring_) co_return co_await net_->send_read(shared_from_this(), hdr, read_lsn, addr, len, std::move(dest));
+
+    // On-ring read: no late delivery (a result nobody awaits is worthless); the deadline just caps the wait.
+    auto const* rf = fault_snapshot();
+    if (!rf->up) co_return fail(craft_error::REPLICA_DOWN);
+    auto const op_to = net_->op_timeout();
+    auto const delay = rf->delay;
+    bool const timed_out = (delay.count() > 0 && op_to.count() > 0 && delay >= op_to);
+    co_await ring_delay(timed_out ? op_to : delay);
+    if (timed_out) co_return std::unexpected(std::make_error_condition(std::errc::timed_out));
+    if (!fault_snapshot()->up) co_return fail(craft_error::REPLICA_DOWN);
+    co_return do_read(hdr, read_lsn, addr, len, std::move(dest));
 }
-async_result< LSNPair > MemCraftReplica::keep_alive(client_hdr hdr) {
+async_result< lsn_pair > MemCraftReplica::keep_alive(client_hdr hdr) {
     if (!net_) co_return fail(craft_error::NO_QUORUM);
-    co_return co_await net_->send_keep_alive(shared_from_this(), hdr);
+    if (!ring_) co_return co_await net_->send_keep_alive(shared_from_this(), hdr);
+
+    // On-ring keep_alive: like read -- deadline caps the wait, no late delivery.
+    auto const* rf = fault_snapshot();
+    if (!rf->up) co_return fail(craft_error::REPLICA_DOWN);
+    auto const op_to = net_->op_timeout();
+    auto const delay = rf->delay;
+    bool const timed_out = (delay.count() > 0 && op_to.count() > 0 && delay >= op_to);
+    co_await ring_delay(timed_out ? op_to : delay);
+    if (timed_out) co_return std::unexpected(std::make_error_condition(std::errc::timed_out));
+    if (!fault_snapshot()->up) co_return fail(craft_error::REPLICA_DOWN);
+    co_return do_keep_alive(hdr);
 }
-async_result< LSNPair > MemCraftReplica::get_lsns() { co_return do_lsns(); }
-async_result< LSNPair > MemCraftReplica::get_rs_commit_lsn() { co_return do_lsns(); }
+
+// ── on-ring transport (prepare_for_async) ──
+
+void MemCraftReplica::prepare_for_async(::io_uring* ring) noexcept { ring_ = ring; }
+
+// Suspend the calling leg on a single ring timer. Submission is DEFERRED to the driver's reap loop (which
+// batches the burst of legs one QD>1 op fans out into); that loop reaps the CQE and calls complete_cqe_state,
+// resuming us. The awaitable is frame-local and non-movable -- its address is the SQE's user_data, so it must
+// stay put across the suspend, which a coroutine frame guarantees.
+async_status MemCraftReplica::ring_delay(std::chrono::milliseconds d) {
+    sisl::async::cqe_awaitable ev;
+    ::io_uring_sqe* sqe = ::io_uring_get_sqe(ring_);
+    if (nullptr == sqe) { // SQ full: flush the queued legs to make room, then retry once
+        (void)::io_uring_submit(ring_);
+        sqe = ::io_uring_get_sqe(ring_);
+    }
+    if (nullptr == sqe) co_return ok(); // still none (SQ undersized): degrade to no-delay, never hang
+    if (d.count() > 0) {
+        __kernel_timespec ts{};
+        ts.tv_sec = static_cast< __kernel_time64_t >(d.count() / 1000);
+        ts.tv_nsec = static_cast< long long >((d.count() % 1000) * 1'000'000);
+        ::io_uring_prep_timeout(sqe, &ts, 0, 0); // relative pure timer; CQE res == -ETIME on fire (we ignore it)
+    } else {
+        ::io_uring_prep_nop(sqe); // 0 delay still crosses the ring: completes on the next reap pass
+    }
+    ::io_uring_sqe_set_data64(sqe, sisl::async::encode_managed_user_data(&ev));
+    co_await ev;
+    co_return ok();
+}
+
+// The straggler's detached leg: a write whose delay ran past the client deadline (its caller already gave up
+// with timed_out) still lands here, late, after its OWN ring timer. Weak-ref semantics are unnecessary because
+// the driver drains every ring timer -- this one included -- before the cluster is torn down, so `this` is live.
+async_status MemCraftReplica::late_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                                         std::shared_ptr< std::vector< uint8_t > > bytes,
+                                         std::chrono::milliseconds deliver) {
+    co_await ring_delay(deliver);
+    auto const* lf = fault_snapshot();
+    if (lf->up && lf->write_ok) (void)do_write(hdr, dlsn, addr, len, std::move(bytes)); // dropped iff down in flight
+    co_return ok();
+}
+async_result< lsn_pair > MemCraftReplica::get_lsns() { co_return do_lsns(); }
+async_result< lsn_pair > MemCraftReplica::get_rs_commit_lsn() { co_return do_lsns(); }
 async_result< std::vector< JournalSlot > > MemCraftReplica::fetch_data(std::vector< int64_t > lsns) {
     co_return do_fetch(lsns);
 }
@@ -149,20 +252,20 @@ result< std::vector< io_extent > > MemCraftReplica::do_read(client_hdr hdr, int6
     return read_range(read_lsn, addr, len, dest);
 }
 
-result< LSNPair > MemCraftReplica::do_keep_alive(client_hdr hdr) {
+result< lsn_pair > MemCraftReplica::do_keep_alive(client_hdr hdr) {
     std::lock_guard< std::mutex > g{mu_};
     // Term-fenced: a stale client must NOT reset the liveness watchdog (that would block failover).
     if (hdr.term != state_.term) return fail(craft_error::STALE_TERM);
     keepalives_served_.fetch_add(1, std::memory_order_relaxed); // test observability: the client's liveness drive
     apply_up_to(hdr.commit_lsn);
     // watchdog reset + journal reclaim below min(hdr.all_committed_lsn, commit_lsn) are deferred seams.
-    return LSNPair{state_.commit_lsn, state_.last_append_lsn};
+    return lsn_pair{state_.commit_lsn, state_.last_append_lsn};
 }
 
-result< LSNPair > MemCraftReplica::do_lsns() {
+result< lsn_pair > MemCraftReplica::do_lsns() {
     if (net_ && !net_->is_up(ep_.id)) return fail(craft_error::REPLICA_DOWN);
     std::lock_guard< std::mutex > g{mu_};
-    return LSNPair{state_.commit_lsn, state_.last_append_lsn};
+    return lsn_pair{state_.commit_lsn, state_.last_append_lsn};
 }
 
 status MemCraftReplica::do_truncate(int64_t lsn) {
@@ -352,9 +455,9 @@ replica_stats MemCraftReplica::stats() const {
 
 // ── cold-path hooks (driven by MemTransport, which does NOT hold its own lock while calling these) ──
 
-LSNPair MemCraftReplica::peek_lsns() {
+lsn_pair MemCraftReplica::peek_lsns() {
     std::lock_guard< std::mutex > g{mu_};
-    return LSNPair{state_.commit_lsn, state_.last_append_lsn};
+    return lsn_pair{state_.commit_lsn, state_.last_append_lsn};
 }
 void MemCraftReplica::cold_apply_sync(int64_t rs_commit_lsn, uint64_t /*client_token*/) {
     std::lock_guard< std::mutex > g{mu_};

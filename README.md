@@ -27,7 +27,7 @@ a byte range) and reads are sparse (data extents + holes; zeros never cross the 
 | Component | What it is | Depends on |
 |---|---|---|
 | **`craft_wire`** | The on-wire codec -- packed little-endian message framing, CRC32C digests, extent scatter. A **std-only leaf** (the future standalone dependency). | -- (std) |
-| **`craft_types`** | The domain vocabulary (`LSNPair`, `io_extent`, `client_hdr`, `LoginResult`, `craft_error`, `peer_id_t`) + the `async_result` aliases + the `craft_replica` backend interface + `make_client`. Header-only. | sisl, boost |
+| **`craft_types`** | The domain vocabulary (`lsn_pair`, `io_extent`, `client_hdr`, `LoginResult`, `craft_error`, `peer_id_t`) + the `async_result` aliases + the `craft_replica` backend interface + `make_client`. Header-only. | sisl, boost |
 | **`craft_client`** | The client behind the opaque handle: dLSN assignment, quorum broadcast, read routing + failover, login/redirect -- driven by free functions, over a pluggable `craft_replica` transport. Plus the io_uring TCP transport. | craft_wire, craft_types, sisl, liburing |
 | **`craft_reference`** | An in-memory reference `craft_replica` + a loopback cluster server, so the client can be driven end-to-end with **no storage engine**. Also hosts the public in-process builder (`craft/local.hpp`). Test/dev-support. | craft_client |
 

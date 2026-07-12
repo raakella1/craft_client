@@ -54,9 +54,10 @@ private:
 
 // ── free functions: the public surface ──
 
-local_cluster_handle make_local_cluster(volume_id_t vol_id, uint32_t n, uint32_t page_size, uint64_t capacity) {
+local_cluster_handle make_local_cluster(volume_id_t vol_id, uint32_t n, uint32_t page_size, uint64_t capacity,
+                                        uint32_t max_tx) {
     return std::make_shared< local_cluster >(
-        make_mem_replica_group(vol_id, n, page_size, /*threads_per_replica=*/2, capacity));
+        make_mem_replica_group(vol_id, n, page_size, /*threads_per_replica=*/2, capacity, max_tx));
 }
 
 std::vector< std::shared_ptr< craft_replica > > const& backends(local_cluster_handle const& c) { return c->backends(); }

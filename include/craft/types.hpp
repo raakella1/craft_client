@@ -55,11 +55,6 @@ using peer_id_t = boost::uuids::uuid;
 // each replica's peer_id_t deterministically from it (mem_replica_id).
 using volume_id_t = boost::uuids::uuid;
 
-// Fundamental block-addressing aliases. The byte-based CRAFT API uses raw uint64_t, but the model's per-block
-// index speaks lba_t / lba_count_t.
-using lba_t = uint64_t;
-using lba_count_t = uint32_t;
-
 // Network address of a replica, as returned in login()'s member list.
 struct replica_endpoint {
     peer_id_t id;
@@ -67,7 +62,7 @@ struct replica_endpoint {
 };
 
 // {commit_lsn, last_append_lsn} snapshot -- returned by get_lsns() / keep_alive().
-struct LSNPair {
+struct lsn_pair {
     int64_t commit_lsn{-1};
     int64_t last_append_lsn{-1};
 };
@@ -103,6 +98,11 @@ struct LoginResult {
     uint32_t lba_size{0};    // block size in bytes (alignment unit for addr/len)
     uint64_t capacity{0};    // volume size in bytes (the driver's device geometry)
     peer_id_t leader_hint{}; // non-nil iff this is a redirect (term==0); retry login there
+    // Volume max transfer in bytes: the largest single CRAFT IO the volume accepts. The server's authoritative
+    // value (also on the wire login_rsp); a block-device driver caps its device max IO to it, and the on-ring TCP
+    // transport frames against it -- so it is conveyed ONCE via login, never picked independently downstream.
+    // (Kept last so the positional aggregate inits above stay valid; 0 on a redirect.)
+    uint32_t max_tx{0};
 };
 
 // One sub-range of a contiguous IO's sparse layout, in BYTES: a data extent (hole=false) or a hole

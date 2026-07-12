@@ -33,7 +33,7 @@ TEST(CraftTypes, ErrorConditionRoundTrips) {
 }
 
 TEST(CraftTypes, DataStructDefaults) {
-    craft::LSNPair const p;
+    craft::lsn_pair const p;
     EXPECT_EQ(p.commit_lsn, -1);
     EXPECT_EQ(p.last_append_lsn, -1);
     craft::io_extent const e{100, 512, true};
@@ -45,6 +45,6 @@ TEST(CraftTypes, DataStructDefaults) {
 
 // Compile-only: a domain code rides the type-erased result carrier -- the whole point of the sisl vocabulary.
 craft::async_status ok_coro() { co_return sisl::ok(); }
-craft::async_result< craft::LSNPair > fenced_coro() {
+craft::async_result< craft::lsn_pair > fenced_coro() {
     co_return std::unexpected(craft::make_error_condition(craft::craft_error::STALE_TERM));
 }

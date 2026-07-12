@@ -407,23 +407,20 @@ anybody -- teaches the client nothing.
 | 4 | A peer that **times out may still have applied** the write | Counting it as a deterministic reject resolves the slot `Empty` and advances `F` past a dLSN a replica later applies. Divergence. | `ClearingADelayLeavesAMissingSlotThatDrains` |
 | 5 | `REPLICA_DOWN` means **"I never delivered it"** | Only the transport can say that; a down server cannot answer for itself. It is what lets the client count it as a deterministic reject. | `N3_AllReplicasRefuseResolvesEmptyAndReleasesTheFrontier` |
 | 6 | **Either** serialize `data` before suspending, **or** signal when the send completes | The client acks at quorum with stragglers in flight, so the caller's buffer must outlive every *send* while only a quorum of *replies* is awaited. | `N3_StragglerWriteLandsIntactAfterTheClientReturned` |
-| 7 | The reply must be **reapable on the issuing queue's ring** | The ublk per-IO coroutine may only be resumed by its own queue thread (see #1: the client migrates coroutines by itself). If the transport cannot deliver its reply as a CQE on that queue's io_uring, the driver must bridge with an fd the queue already polls. | `CraftUblkDisk::queue_service` |
+| 7 | The reply must be **reapable as a CQE on the issuing queue's ring** | The ublk per-IO coroutine may only be resumed by its own queue thread (see #1: the client migrates coroutines by itself). The on-ring transport submits its socket ops on that queue's io_uring, so the reply is a CQE `run_queue_loop` already reaps on the queue thread. | `prepare_for_async` + the on-ring transport |
 
-Requirement 7 is what the driver is built around. `queue_service` parks a coroutine on `POLL_ADD` over the
-ublk queue's own ring, watching an eventfd; a CRAFT completion on any thread publishes its result into the
-IO's tag slot and kicks it. **The eventfd is the model's stand-in for a socket.** A real transport polls its
-connection fd in exactly that loop and parses the reply on the queue thread; it will still index its landing
-pad by request id, which is what a tag already is, so `craft_service_loop` does not change. This is also why
-`craft_ublk` needs no iomgr: ublkpp runs one OS thread per hardware queue over that queue's io_uring, and
-that is the whole runtime.
+Requirement 7 is what the driver is built around, and the on-ring transport now satisfies it directly. Each
+replica leg submits its socket op -- an `IORING_OP_SEND` / `RECV` (TCP), or a timer `IORING_OP_TIMEOUT` (the mem
+reference) -- on the ublk queue's OWN ring, tagged with a managed `sisl::async::cqe_state`. So the reply is a
+CQE `run_queue_loop` already reaps on the queue thread, resuming the leg there; the whole completion chain, up
+to the per-IO worker's finish, runs on that one thread. The driver keeps no iomgr: ublkpp runs one OS thread per
+hardware queue over that queue's io_uring, and that is the whole runtime.
 
-The landing pad deserves a word, because it is the reason the driver takes no lock. A ublk tag is *"unique in
-queue wide"* and carries at most one IO, hence at most one completion, at a time -- the same invariant that
-lets ublkpp pre-reserve `async_io::_pool` per tag. So the tag space **is** the queue: `queue_service` holds a
-flat `completion_slot[q_depth]`, the producer release-stores its `cqe_state*` into `slots[tag]`, and the
-single consumer acquire-exchanges it back out. No ring, no MPSC queue, no per-completion `std::function`
-allocation, no mutex. One wake drains a whole batch; the cost is an O(`q_depth`) scan of relaxed loads, which
-at ublkpp's default `--qdepth` of 128 is 128 loads amortized over however many completions that wake carried.
+An earlier cut, when a transport completed on a foreign pool thread, bounced that final hop back to the queue
+thread through an eventfd + `POLL_ADD` standing in for a socket. The socket is real now and polled on the queue
+ring, so the stand-in is gone: the per-IO worker resumes the ublk coroutine directly (this holds for a SINGLE
+queue -- one client ring is bound, so a second queue is rejected until per-queue rings land). The `request_id`
+still indexes the reply's landing pad, which is what a ublk tag already is.
 
 Requirement 6 is the one to watch, because the shim currently **grants it for free** and that is a choice, not
 a fact. `MemTransport::take_payload` copies at issue, before any suspension, so today's client may recycle its
@@ -481,19 +478,16 @@ replica -- which is precisely the seam a real transport will occupy.
   delivers a reply inline with its submit. Each replica has its own pool (`--num_threads`, per replica), so it
   may reply to two of its own requests out of order, and different replicas are independent. Reordering across
   peers is what quorum depends on.
-* **The driver hands the result back to its own queue, never resumes it in place.** `run_craft_io` finishes on
-  whatever thread the CRAFT completion landed on, release-stores the result into that IO's
-  `queue_service::slots[tag]`, and kicks an eventfd. The queue's service-loop coroutine is parked on `POLL_ADD`
-  over the queue's own ring, so `run_queue_loop` resumes it *there* and the per-IO `cqe_state` is resumed on the
-  queue thread. It has to be: `resolve()` ends in `gate_.signal()`, which resumes a suspended reader inline on
-  the resolving thread, so a read issued on queue A can finish on queue B. Drain order is load-bearing --
-  `read(evfd)` **before** the slot scan, because a post that lands after the scan writes the level-triggered
-  eventfd after our read, and so re-arms the next `POLL_ADD`. Reading second would lose that wakeup.
-* **The driver's completion path takes no lock and allocates nothing.** `slots[tag]` is a single-producer /
-  single-consumer cell, and the tag guarantees no two producers ever pick the same one. The producer's
-  release-store of `state` publishes the plain `result` beside it; the consumer's acquire-exchange pairs with
-  it and claims the slot. The relaxed load that filters an empty slot is not a synchronization edge and does
-  not need to be, since it only ever decides whether to *skip*.
+* **The per-IO worker resumes the ublk coroutine directly, on the queue thread.** With the on-ring transport
+  every reply CQE is reaped on the queue's own ring, so `run_craft_io` finishes on the queue thread and resumes
+  the parked per-IO `cqe_state` in place -- no cross-thread hand-off, no eventfd. This is correct only because
+  the transport completes on that thread (requirement 7), and it holds for a single queue, which `prepare`
+  enforces. (`resolve()` still ends in `gate_.signal()`, which resumes a suspended reader inline on the
+  resolving thread; on one queue that thread is the queue thread.)
+* **The driver's completion path takes no lock and allocates nothing.** The per-IO `cqe_state` lives in the
+  tag's pre-reserved pool, so its pointer is stable; the direct resume is a plain store of the result plus a
+  `coroutine_handle::resume()` on the queue thread -- no landing-pad cell, no MPSC queue, no `std::function`
+  allocation, no mutex.
 
 ### Where the locks are
 
@@ -543,8 +537,8 @@ exactly one other execution context. Nothing else moves.
 
 Two traps. A single `fio` job submits from one CPU, so ublk steers all of its IO to **one** hw queue and
 `--nr_hw_queues` changes nothing; at QD32 you are reading `iops = 32 / latency` off a single queue thread. And
-the completion side already coalesces: under load the queue thread never sleeps, so N completions arriving
-between two `POLL_ADD`s cost one wake rather than N. Coalescing the eventfd kick would buy nothing.
+the completion side already coalesces: under load the queue thread never sleeps, so the N reply CQEs arriving
+between two `submit_and_wait` batches cost one wake rather than N.
 
 ## Observability: the craft_ublk REST endpoint
 

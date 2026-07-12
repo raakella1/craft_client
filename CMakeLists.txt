@@ -35,6 +35,7 @@ add_library(craft_client STATIC
   src/dlsn_tracker.cpp
   src/net/conn.cpp
   src/net/tcp_client.cpp
+  src/net/async_conn.cpp # the P2 on-ring TCP data path (recv-demux pump); internal, behind tcp_replica
   src/net/tcp_replica.cpp
   src/net/tcp_cluster.cpp) # craft/tcp.hpp: the public "connect to remote servers" backend builder
 target_include_directories(craft_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -52,6 +53,12 @@ add_library(craft_reference STATIC
 target_include_directories(craft_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(craft_reference PUBLIC craft_client)
 target_compile_features(craft_reference PUBLIC cxx_std_23)
+
+# ── craft_reference_tcp_srv: a STANDALONE single-replica reference server. Run N of them on different ports to
+# form a multi-process cluster; point a client (ublkpp_disk --craft-tcp) at them. Test/dev support, not installed.
+add_executable(craft_reference_tcp_srv tools/craft_reference_tcp_srv.cpp)
+target_link_libraries(craft_reference_tcp_srv PRIVATE craft_reference)
+target_compile_features(craft_reference_tcp_srv PRIVATE cxx_std_23)
 
 # ── tests ──
 add_executable(test_wire test/test_wire.cpp)
@@ -78,6 +85,10 @@ target_include_directories(test_dlsn_tracker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 craft_test(test_cluster      craft_reference)
 craft_test(test_tcp          craft_reference)
 craft_test(test_tcp_replica  craft_reference)
+craft_test(test_async_mem    craft_reference) # the on-ring async transport (prepare_for_async) driven at depth
+target_include_directories(test_async_mem PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # white-box: tracker_stats fields
+craft_test(test_async_tcp    craft_reference) # the on-ring TCP transport (recv-demux pump) over real loopback sockets
+target_include_directories(test_async_tcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # white-box: tracker_stats fields
 
 # test_client / test_client_tcp carry their own main() + SISL_LOGGING_DEF (no shared main).
 function(craft_test_ownmain name)

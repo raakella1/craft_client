@@ -45,6 +45,7 @@
 #include <sisl/async/shared_awaitable.hpp>
 
 #include <craft/mem/replica.hpp>
+#include <craft/wire.hpp> // wire::k_default_max_tx (the single-sourced volume max-transfer default)
 
 namespace craft {
 
@@ -63,7 +64,7 @@ public:
     // `capacity` is the volume size in bytes reported to a client at login (the driver's device geometry).
     // The model itself is thin / unbounded; capacity is advisory, defaulting to 1 GiB.
     MemTransport(std::vector< replica_endpoint > members, uint32_t lba_size, std::size_t threads_per_replica = 2,
-                 uint64_t capacity = uint64_t{1} << 30);
+                 uint64_t capacity = uint64_t{1} << 30, uint32_t max_tx = wire::k_default_max_tx);
     ~MemTransport();
 
     // Join every replica's server pool and drain what is queued. Idempotent.
@@ -102,7 +103,7 @@ public:
     async_result< std::vector< io_extent > > send_read(std::shared_ptr< MemCraftReplica > to, client_hdr hdr,
                                                        int64_t read_lsn, uint64_t addr, uint64_t len,
                                                        sisl::sg_list dest);
-    async_result< LSNPair > send_keep_alive(std::shared_ptr< MemCraftReplica > to, client_hdr hdr);
+    async_result< lsn_pair > send_keep_alive(std::shared_ptr< MemCraftReplica > to, client_hdr hdr);
 
     // ── cold path: leader-only orchestration ──
     // login: GetRSCommitLSN -> SyncRSCommitLSN -> InternalLogin. A non-leader returns LoginResult with
@@ -209,6 +210,8 @@ private:
     uint64_t term_{0};
     uint32_t lba_size_{0}; // volume block size (bytes)
     uint64_t capacity_{0}; // volume size (bytes); reported at login as the driver's device geometry
+    uint32_t max_tx_{
+        wire::k_default_max_tx}; // volume max transfer (bytes); reported at login, single-sourced downstream
     // Guards ONLY by_id_ / leader_ / term_, all of which are cold-path (register_replica, run_login,
     // run_logout, set_leader). The IO path never takes it. The by-id fault forwarders take it to look up the
     // replica, then read/mutate that replica's own lock-free knobs (never mu_ AND a replica lock nested).
@@ -243,7 +246,8 @@ struct MemReplicaGroup {
     }
 };
 MemReplicaGroup make_mem_replica_group(volume_id_t vol_id, uint32_t n = 3, uint32_t page_size = 4096,
-                                       std::size_t threads_per_replica = 2, uint64_t capacity = uint64_t{1} << 30);
+                                       std::size_t threads_per_replica = 2, uint64_t capacity = uint64_t{1} << 30,
+                                       uint32_t max_tx = wire::k_default_max_tx);
 
 // Deterministic per-replica id derived from the volume id + index (so tests are reproducible).
 peer_id_t mem_replica_id(volume_id_t vol_id, uint32_t index);

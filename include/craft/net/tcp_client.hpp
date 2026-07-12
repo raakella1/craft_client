@@ -22,7 +22,7 @@
 // what keeps it an embeddable, self-contained reference client (buildable against just the wire spec +
 // liburing). A transport fault is a net_error; a server's protocol status (STALE_TERM, ...) is NOT an error
 // here -- it rides IN the reply value, so the caller inspects it. The homeblocks mapping (wire::status ->
-// craft_error, replies -> LSNPair / io_extent) belongs to the P3 craft_replica adapter, not here.
+// craft_error, replies -> lsn_pair / io_extent) belongs to the P3 craft_replica adapter, not here.
 //
 // Still blocking submit-and-wait and one connection == one session; the send_all / recv_message interface is
 // what stays as the async model swaps craft_conn's internals.

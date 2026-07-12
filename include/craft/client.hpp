@@ -28,6 +28,8 @@
 
 #include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases
 
+struct io_uring; // liburing (fwd-decl only: prepare_for_async takes a pointer to a host ring)
+
 namespace craft {
 
 class craft_client; // opaque -- defined only in the library's source
@@ -57,8 +59,16 @@ async_status logout(client_handle const& c);
 inline constexpr std::size_t k_no_leg = ~std::size_t{0};
 void drive_keepalives(client_handle const& c, std::size_t exclude_idx = k_no_leg);
 
+// Bind the client's whole backend set to a host io_uring `ring` for on-ring async completion, so writes/reads
+// go in flight at once (QD>1) and complete on the ring owner's reap thread. A driver that owns a ring (a ublk
+// queue, or a test harness) calls this once after login, off the IO path; it fans out to each backend's
+// prepare_for_async, and transports that don't submit on a caller ring ignore it. UNCHANGED verbs: write/read
+// keep their signatures -- the client never learns the completion source moved onto the ring.
+void prepare_for_async(client_handle const& c, ::io_uring* ring);
+
 uint32_t lba_size(client_handle const& c); // volume block size in bytes (alignment unit for addr/len)
 uint64_t capacity(client_handle const& c); // volume size in bytes (a block-device driver's device geometry)
+uint32_t max_tx(client_handle const& c);   // volume max transfer in bytes (login-conveyed; a driver caps IO to it)
 uint64_t term(client_handle const& c);
 
 // ── observability (safe to call while IO is in flight) ── dlsn_stats returns tracker_stats, whose definition

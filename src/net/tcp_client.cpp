@@ -24,7 +24,11 @@
 namespace craft::net {
 
 namespace {
-constexpr uint32_t k_max_tx = 512 * 1024;
+// Bound the recv at the framed BODY max for the default payload at the smallest block size (512 B) -- the worst
+// case for the extent-descriptor table a read reply lays down on top of the data -- so a full-payload read parses
+// regardless of the volume's lba. max_tx itself (the payload) is the clean 512 KiB; the transport carries more.
+// This reference client assumes the default payload (a real volume conveys its own via login).
+constexpr uint32_t k_max_tx = wire::framed_body_max(wire::k_default_max_tx, 512);
 
 template < class T >
 std::span< uint8_t const > as_bytes(T const& v) {

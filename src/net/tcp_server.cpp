@@ -14,13 +14,15 @@
  *********************************************************************************/
 
 // This is the reference TCP server: it backs the server with the reference model
-// (MemCraftReplica) and speaks its domain types (client_hdr, LSNPair, io_extent, craft_error). It references
+// (MemCraftReplica) and speaks its domain types (client_hdr, lsn_pair, io_extent, craft_error). It references
 // no homestore SYMBOL, so it still links without the engine (see test_craft_tcp).
 
 #include <craft/net/tcp_server.hpp>
 
 #include <algorithm>
 #include <utility>
+
+#include <sisl/logging/logging.h> // server-side r/w trace (base module; visible with -v trace / when a consumer inits logging)
 
 #include <craft/mem/replica.hpp> // the full MemCraftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
 #include <craft/status.hpp>      // to_wire_status (the shared wire <-> craft_error bridge)
@@ -55,6 +57,9 @@ void craft_tcp_server::serve(craft_conn conn) {
         switch (static_cast< wire::op >(parsed->hdr.op)) {
         case wire::op::login:
             on_login(conn, *parsed);
+            break;
+        case wire::op::helo:
+            on_helo(conn, *parsed);
             break;
         case wire::op::write:
             on_write(conn, *parsed);
@@ -98,6 +103,20 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
     conn.send_all(out);
 }
 
+void craft_tcp_server::on_helo(craft_conn& conn, wire::message const& req) {
+    auto const hr = wire::decode< wire::helo_req >(req.op_header);
+    // FAKE cold path (until peer-to-peer replica comms): a follower this client never logged into ADOPTS the
+    // presented (leader's) session term and establishes locally. A fresh cluster starts empty (dLSN -1 on every
+    // replica), so no cross-replica RS-commit-lsn sync is needed yet; term-fencing is what HELO must restore so
+    // subsequent IO at this term is accepted. Re-HELO after a term bump just re-establishes at the new term.
+    session_term_ = hr.term;
+    session_active_ = true;
+    replica_->srv_establish(hr.client_token, hr.term);
+    std::vector< uint8_t > out;
+    wire::frame_message(out, wire::op::helo_rsp, static_cast< uint8_t >(wire::status::ok), req.hdr.request_id, {}, {});
+    conn.send_all(out);
+}
+
 void craft_tcp_server::on_logout(craft_conn& conn, wire::message const& req) {
     auto st = wire::status::ok;
     if (!session_active_)
@@ -126,6 +145,8 @@ void craft_tcp_server::on_write(craft_conn& conn, wire::message const& req) {
         if (!r) code = to_wire_status(r.error());
     }
     auto const lsns = replica_->srv_lsns();
+    LOGTRACE("craft_srv WR [rid:{}] dlsn={} addr={} len={} status={} commit_lsn={}", req.hdr.request_id, wr.dlsn,
+             wr.addr, wr.len, static_cast< int >(code), lsns.commit_lsn);
     wire::write_rsp rsp{lsns.commit_lsn, lsns.last_append_lsn};
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::write_rsp, static_cast< uint8_t >(code), req.hdr.request_id, as_bytes(rsp), {});
@@ -172,6 +193,8 @@ void craft_tcp_server::on_read(craft_conn& conn, wire::message const& req) {
             }
         }
     }
+    LOGTRACE("craft_srv RD [rid:{}] read_lsn={} addr={} len={} status={} extents={} body={}B", req.hdr.request_id,
+             rr.read_lsn, rr.addr, rr.len, static_cast< int >(code), rsp.extent_count, body.size());
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::read_rsp, static_cast< uint8_t >(code), req.hdr.request_id, as_bytes(rsp), body);
     conn.send_all(out);

@@ -20,7 +20,9 @@
 // to the reference model -- but only in the .cpp: the replica is a pimpl (forward-declared here, included in
 // craft_tcp_server.cpp), so THIS header stays homeblocks-free (wire + connection only).
 //
-// Still one connection == one session, blocking submit-and-wait: no HELLO (P3), no auth (P6).
+// Blocking submit-and-wait. HELO is handled as a FAKE cold path (until peer-to-peer replica comms land): a
+// standalone replica this client never logged into adopts the presented session term and establishes locally, so
+// a fresh (empty) cluster of independent craft_reference_tcp_srv processes serves term-fenced IO. No auth (P6).
 
 #include <cstdint>
 #include <memory>
@@ -62,6 +64,7 @@ private:
     bool session_active_ = false;                // false before LOGIN / after LOGOUT -> IO is fenced
 
     void on_login(craft_conn&, wire::message const&);
+    void on_helo(craft_conn&, wire::message const&);
     void on_logout(craft_conn&, wire::message const&);
     void on_write(craft_conn&, wire::message const&);
     void on_read(craft_conn&, wire::message const&);
