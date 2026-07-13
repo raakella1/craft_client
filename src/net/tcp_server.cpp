@@ -48,6 +48,21 @@ craft_tcp_server::craft_tcp_server(server_geometry geo) : geo_{std::move(geo)} {
 
 craft_tcp_server::~craft_tcp_server() = default;
 
+void craft_tcp_server::log_stats() const {
+    auto const s = replica_->stats();
+    LOGINFO("craft_srv STATS commit_lsn={} last_append_lsn={} journal_slots={} missing={} mapped_blocks={}",
+            s.commit_lsn, s.last_append_lsn, s.journal_slots, s.missing_count, s.mapped_blocks);
+    if (s.missing_count != 0) {
+        std::string sample;
+        for (auto const d : s.missing_sample)
+            sample += std::to_string(d) + " ";
+        LOGWARN("craft_srv MISSING {} slot(s) [{}] -- commit_lsn is PINNED at {} (< last_append {}). Nothing fills "
+                "a Missing slot: that is resync, i.e. the PEER PLANE, which does not exist yet. Every read now "
+                "walks the journal tail backward from its horizon.",
+                s.missing_count, sample, s.commit_lsn, s.last_append_lsn);
+    }
+}
+
 void craft_tcp_server::serve(craft_conn conn) {
     for (;;) {
         auto msg = conn.recv_message(geo_.max_tx);

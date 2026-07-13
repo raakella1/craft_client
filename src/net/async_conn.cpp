@@ -164,6 +164,8 @@ sisl::async::disk_task< int > craft_async_conn::run_pump() {
             fail_all();
             co_return 0;
         }
+        ++n_recv_;
+        n_recv_bytes_ += static_cast< uint64_t >(n);
         rx_.insert(rx_.end(), recv_scratch_.data(), recv_scratch_.data() + n);
 
         // Drain every complete message now buffered, demuxing each to the leg that awaits its request_id.
@@ -177,6 +179,7 @@ sisl::async::disk_task< int > craft_async_conn::run_pump() {
                 fail_all();
                 co_return 0;
             }
+            ++n_reply_;
             uint16_t const rid = parsed->hdr.request_id;
             std::size_t const total = parsed->total;
             auto it = pending_.find(rid);

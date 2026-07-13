@@ -19,11 +19,23 @@
 #include <span>
 #include <utility>
 
+#include <chrono>
+
+#include <sisl/logging/logging.h> // the round-trip summary at shutdown (rt_stat)
+
 #include <craft/status.hpp> // status_to_error (the shared wire <-> craft_error bridge)
 
 #include "net/async_conn.hpp" // the on-ring data path (internal); its dtor is emitted here where it is complete
 
 namespace craft {
+
+namespace {
+// Nanoseconds since `t0`, for the wire round-trip stats. steady_clock::now() is a vDSO read (no syscall).
+inline uint64_t ns_since(std::chrono::steady_clock::time_point t0) {
+    return static_cast< uint64_t >(
+        std::chrono::duration_cast< std::chrono::nanoseconds >(std::chrono::steady_clock::now() - t0).count());
+}
+} // namespace
 
 namespace {
 auto fail(craft_error e) { return std::unexpected(make_error_condition(e)); }
@@ -65,6 +77,25 @@ CraftTcpReplica::CraftTcpReplica(std::string host, uint16_t port, peer_id_t id, 
 }
 
 void CraftTcpReplica::shutdown() {
+    // WIRE + SERVER time, per op class -- everything craft_client does is ABOVE this proxy and excluded. If the
+    // read average here tracks the driver's read latency, the client is WAITING and the cost is the wire or the
+    // server; if it does not, the gap is being burned above us and belongs to a profiler.
+    auto const dump = [this](char const* what, rt_stat const& s) {
+        auto const n = s.count.load(std::memory_order_relaxed);
+        if (n == 0) return;
+        double const avg_us = static_cast< double >(s.total_ns.load(std::memory_order_relaxed)) / n / 1000.0;
+        double const max_us = static_cast< double >(s.max_ns.load(std::memory_order_relaxed)) / 1000.0;
+        LOGINFO("craft_rt {}:{} {:<9} n={:<8} avg={:8.2f}us  max={:9.2f}us", host_, port_, what, n, avg_us, max_us);
+    };
+    dump("read", rt_read_);
+    dump("write", rt_write_);
+    dump("keepalive", rt_keepalive_);
+    if (aconn_ && aconn_->n_reply() > 0) {
+        LOGINFO("craft_rt {}:{} pump      recvs={} replies={} recvs/reply={:.2f} avg_recv={:.0f}B", host_, port_,
+                aconn_->n_recv(), aconn_->n_reply(),
+                static_cast< double >(aconn_->n_recv()) / static_cast< double >(aconn_->n_reply()),
+                static_cast< double >(aconn_->n_recv_bytes()) / static_cast< double >(aconn_->n_recv()));
+    }
     {
         std::lock_guard< std::mutex > g{mu_};
         stop_ = true;
@@ -218,7 +249,9 @@ async_result< lsn_pair > CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, ui
                 std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
         if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
+        auto const t0 = std::chrono::steady_clock::now();
         auto r = co_await aconn_->write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
+        rt_write_.add(ns_since(t0));
         if (!r) co_return std::unexpected(net_to_error(r.error()));
         if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
         co_return lsn_pair{r->commit_lsn, r->last_append_lsn}; // the reply's piggybacked watermarks
@@ -254,7 +287,9 @@ async_result< read_result > CraftTcpReplica::read(client_hdr hdr, int64_t read_l
                 std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
         if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
+        auto const t0 = std::chrono::steady_clock::now();
         auto r = co_await aconn_->read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
+        rt_read_.add(ns_since(t0));
         if (!r) co_return std::unexpected(net_to_error(r.error()));
         reply = std::move(*r);
     } else {
@@ -286,7 +321,9 @@ async_result< lsn_pair > CraftTcpReplica::keep_alive(client_hdr hdr) {
                 std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
         if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
+        auto const t0 = std::chrono::steady_clock::now();
         auto r = co_await aconn_->keep_alive(hdr.commit_lsn, hdr.all_committed_lsn);
+        rt_keepalive_.add(ns_since(t0));
         if (!r) co_return std::unexpected(net_to_error(r.error()));
         if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
         co_return lsn_pair{r->commit_lsn, r->last_append_lsn};

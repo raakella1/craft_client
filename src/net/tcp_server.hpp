@@ -56,6 +56,13 @@ public:
     // Handle one connection until it closes (blocking). Run on a thread for the test.
     void serve(craft_conn conn);
 
+    // DIAGNOSTIC: log this replica's CRAFT state -- commit frontier, journal depth, and any MISSING dLSNs. A
+    // Missing slot (a write this replica never received, because the client acked at quorum without it)
+    // permanently PINS commit_lsn below it: nothing fills the hole, because filling it is resync == the peer
+    // plane, which does not exist yet (see docs/peer-plane.md). A pinned commit_lsn also means the journal never
+    // reclaims and every read walks the unapplied tail. Defined in the .cpp, where MemCraftReplica is complete.
+    void log_stats() const;
+
 private:
     server_geometry geo_;
     std::shared_ptr< MemCraftReplica > replica_; // the real state; driven via its srv_* local-server seam

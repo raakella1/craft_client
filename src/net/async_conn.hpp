@@ -158,7 +158,19 @@ private:
     bool sending_{false};
     std::vector< std::coroutine_handle<> > send_waiters_; // ops parked while another holds the send slot
 
-    std::vector< uint8_t > rx_;                           // recv accumulation across message boundaries
+    std::vector< uint8_t > rx_; // recv accumulation across message boundaries
+
+public:
+    // DIAGNOSTIC: how many recv COMPLETIONS the pump burned per reply it demuxed. A recv completes on ANY
+    // available bytes (no MSG_WAITALL), so a reply split across segments costs one extra ring round-trip each --
+    // and each of those waits for the ring owner's next submit batch. recvs/replies ~= 1 means the pump is not
+    // the cost; >> 1 means every extra segment is a full loop iteration.
+    uint64_t n_recv() const { return n_recv_; }
+    uint64_t n_reply() const { return n_reply_; }
+    uint64_t n_recv_bytes() const { return n_recv_bytes_; }
+
+private:
+    uint64_t n_recv_{0}, n_reply_{0}, n_recv_bytes_{0};   // pump-thread only (the reap thread); no atomics needed
     std::vector< uint8_t > recv_scratch_;                 // the pump's per-recv landing buffer
     std::unordered_map< uint16_t, reply_slot* > pending_; // request_id -> the leg awaiting that reply
     uint16_t next_rid_{1};

@@ -122,6 +122,9 @@ int main(int argc, char** argv) {
     }
     for (auto& w : workers)
         w.detach(); // connections close as clients disconnect; the process is exiting anyway
+    // Dump this replica's CRAFT state on the way out: commit frontier vs journal tail, and any MISSING dLSNs. A
+    // single Missing slot pins commit_lsn forever (nothing resyncs it) and makes every read walk the tail.
+    server.log_stats();
     std::cout << "craft_reference_tcp_srv: stopped." << std::endl;
     return 0;
 }

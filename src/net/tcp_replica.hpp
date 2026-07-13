@@ -93,6 +93,24 @@ public:
 
     peer_id_t id() const override { return id_; }
 
+    // ── wire round-trip accounting (DIAGNOSTIC) ──
+    // Wraps exactly the on-ring request->reply await: submit the SQE, wait for the pump to demux the reply.
+    // So it measures WIRE + SERVER and nothing else -- everything craft_client does (dLSN assignment, quorum,
+    // plan_read, eligible) is above this proxy and excluded. Comparing read vs write here is what splits
+    // "the client is computing" from "the client is waiting", which no fio number can do on its own.
+    // Dumped once per proxy at shutdown(). Relaxed atomics: off the correctness path, never read by it.
+    struct rt_stat {
+        std::atomic< uint64_t > count{0};
+        std::atomic< uint64_t > total_ns{0};
+        std::atomic< uint64_t > max_ns{0};
+        void add(uint64_t ns) {
+            count.fetch_add(1, std::memory_order_relaxed);
+            total_ns.fetch_add(ns, std::memory_order_relaxed);
+            uint64_t m = max_ns.load(std::memory_order_relaxed);
+            while (ns > m && !max_ns.compare_exchange_weak(m, ns, std::memory_order_relaxed)) {}
+        }
+    };
+
     // No peer-plane verbs here, by construction: this is a CLIENT-side proxy, and the peer plane's caller is a
     // replica applying a RAFT entry (see craft_peer.hpp). It used to carry four NOT_LEADER stubs it could never
     // honor -- a proxy has no journal to hand a peer.
@@ -130,6 +148,8 @@ private:
         wire::k_default_max_tx}; // the volume max transfer PAYLOAD; a safe ceiling until login learns it from login_rsp
     uint32_t lba_{0};            // the volume block size (login_rsp); with max_tx_ it sizes the on-ring parse bound
                                  // (wire::framed_body_max: payload + a read reply's extent table)
+    rt_stat rt_read_, rt_write_, rt_keepalive_; // wire round-trip, per op class (see rt_stat)
+
     bool connected_{false};
     bool bound_{false};
     uint64_t bound_term_{0}; // the session term this connection is bound at; a new term forces a re-HELO
