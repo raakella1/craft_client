@@ -14,11 +14,16 @@
  *********************************************************************************/
 #pragma once
 
-// The per-replica CRAFT server surface -- one replica device of a partition. This is the backend-agnostic
-// contract a CRAFT client speaks to: the client holds N of these and issues its ops 1:1, never knowing
-// whether a given one is the in-memory reference model (MemCraftReplica), a TCP proxy to a remote server, or
-// a production HomeStore-backed adapter. The consumer's own layer (e.g. homeblocks' volume) wraps a
-// craft_replica to present its native API.
+// The per-replica CLIENT-SIDE surface -- one member of a partition, as the CLIENT addresses it. The client holds
+// N of these and issues its ops 1:1, never knowing whether a given one is a TCP proxy to a remote server
+// (CraftTcpReplica -- the production case, the near half of a transport) or the in-memory reference model
+// (MemCraftReplica -- test/dev support, no wire and no storage engine).
+//
+// This is NOT a storage contract, and a production backend (e.g. HomeBlocks) never CONSTRUCTS a client -- no
+// make_client on that side, ever. The backend lives on the FAR side of a wire: it exposes its own per-replica API
+// and a wire server (craft_tcp_server here; a CraftConnector there) decodes the wire onto that API. Whether a
+// backend also reuses this interface as its internal volume->engine vtable is its own business; the client never
+// sees it.
 //
 // Engine-free: only craft/types.hpp + sisl (result / async::result carrier + sg_list). No storage engine.
 
@@ -134,12 +139,5 @@ public:
     // This replica's endpoint id (for routing / membership).
     virtual peer_id_t id() const = 0;
 };
-
-// Build a CRAFT client over a transport: one craft_replica backend per replica device (`leader` is where login
-// is attempted first; `max_inflight` sizes the tracker's winner-scan tripwire). This is the ONLY construction
-// seam -- a transport author (a TCP builder, the local reference, a homeblocks adapter) implements craft_replica
-// and hands the backends here; the returned handle is driven through the free functions in <craft/client.hpp>.
-client_handle make_client(std::vector< std::shared_ptr< craft_replica > > replicas, uint32_t leader = 0,
-                          uint32_t max_inflight = 128);
 
 } // namespace craft

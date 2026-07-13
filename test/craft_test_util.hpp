@@ -23,7 +23,8 @@
 
 #include <sisl/fds/buffer.hpp>
 
-#include <craft/replica.hpp>
+#include <craft/types.hpp> // PUBLIC vocab only -- so test_api / test_tcp_builder stay honest canaries that the
+                           // public surface is sufficient (they must not reach a src/ header through this)
 
 #include <sisl/async/coro.hpp>
 

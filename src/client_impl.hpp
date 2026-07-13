@@ -15,9 +15,10 @@
 #pragma once
 
 // INTERNAL. The concrete craft_client -- the CRAFT protocol logic (dLSN assignment, quorum broadcast, read
-// routing, commit tracking). No consumer ever sees this class: drivers hold the opaque handle from
-// <craft/client.hpp> and call the free functions; a transport author calls make_client(<craft/replica.hpp>).
-// Only make_client and the free functions (all defined in client.cpp) touch it.
+// routing, commit tracking). No consumer ever sees this class: a driver builds it via make_client
+// ("replica.hpp") over the backends a transport builder handed it, then holds the opaque handle from
+// <craft/client.hpp> and calls the free functions. Only make_client and those free functions (all defined in
+// client.cpp) touch it. A storage backend is never on this side of the wire and never constructs one.
 
 #include <cstddef>
 #include <cstdint>
@@ -28,7 +29,7 @@
 
 #include <sisl/fds/buffer.hpp> // sisl::sg_list
 
-#include <craft/replica.hpp> // the per-replica backend interface craft_client drives
+#include "craft_replica.hpp" // the per-replica backend interface craft_client drives
 
 #include "dlsn_tracker.hpp"   // internal: the dLSN state machine (slot_outcome, tracker_stats, read_plan)
 #include "read_route_map.hpp" // internal: the per-member Missing / read-eligibility map
@@ -39,8 +40,7 @@ class craft_client {
 public:
     craft_client(std::vector< std::shared_ptr< craft_replica > > replicas, uint32_t leader = 0,
                  uint32_t max_inflight = 128) :
-            replicas_(std::move(replicas)), leader_(leader),
-            tracker_(std::make_shared< dlsn_tracker >(max_inflight)) {}
+            replicas_(std::move(replicas)), leader_(leader), tracker_(std::make_shared< dlsn_tracker >(max_inflight)) {}
 
     async_status login(uint64_t client_token);
     async_result< size_t > write(uint64_t addr, uint64_t len, sisl::sg_list data);

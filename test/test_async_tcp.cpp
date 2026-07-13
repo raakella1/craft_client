@@ -32,9 +32,9 @@
 #include <sisl/async/cqe_state.hpp> // is_managed / decode_managed_user_data + complete_cqe_state (the reap contract)
 #include <sisl/async/coro.hpp>      // sisl::async::detach
 
-#include <craft/client.hpp>      // client_handle + verbs + prepare_for_async
-#include <craft/net/tcp_set.hpp> // make_tcp_replica_set (a real cluster server + CraftTcpReplica proxies)
-#include <craft/replica.hpp>     // make_client
+#include <craft/client.hpp>  // client_handle + verbs + prepare_for_async
+#include "net/tcp_set.hpp"   // make_tcp_replica_set (a real cluster server + CraftTcpReplica proxies)
+#include "craft_replica.hpp" // make_client
 
 #include "craft_test_util.hpp" // rg (sync_get, for the blocking login), PAGE, blk, one_iov, page_of
 #include "dlsn_tracker.hpp"    // white-box: tracker_stats fields (issued / unresolved_count) for the depth proof

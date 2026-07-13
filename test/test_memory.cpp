@@ -35,7 +35,7 @@
 #include <gtest/gtest.h>
 
 #include "craft_test_util.hpp"
-#include <craft/mem/cluster.hpp>
+#include "mem/cluster.hpp"
 
 using namespace craft;
 using namespace craft::test;

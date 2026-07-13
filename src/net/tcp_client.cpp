@@ -16,7 +16,7 @@
 // Wire-only: this TU includes only its own header (-> craft_conn + craft_wire) and the standard library. No
 // homeblocks/homestore/sisl symbol enters, so the reference client links standalone.
 
-#include <craft/net/tcp_client.hpp>
+#include "net/tcp_client.hpp"
 
 #include <cstring>
 #include <utility>

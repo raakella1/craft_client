@@ -51,6 +51,7 @@ add_library(craft_reference STATIC
   src/net/cluster_server.cpp
   src/net/tcp_server.cpp)
 target_include_directories(craft_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(craft_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # the internal headers it implements
 target_link_libraries(craft_reference PUBLIC craft_client)
 target_compile_features(craft_reference PUBLIC cxx_std_23)
 
@@ -58,6 +59,7 @@ target_compile_features(craft_reference PUBLIC cxx_std_23)
 # form a multi-process cluster; point a client (ublkpp_disk --craft-tcp) at them. Test/dev support, not installed.
 add_executable(craft_reference_tcp_srv tools/craft_reference_tcp_srv.cpp)
 target_link_libraries(craft_reference_tcp_srv PRIVATE craft_reference)
+target_include_directories(craft_reference_tcp_srv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # net/tcp_server.hpp
 target_compile_features(craft_reference_tcp_srv PRIVATE cxx_std_23)
 
 # ── tests ──
@@ -77,18 +79,24 @@ function(craft_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-craft_test(test_api          craft_reference) # the PUBLIC free-function surface (no internal headers)
-craft_test(test_tcp_builder  craft_reference) # craft/tcp.hpp: connect() a client to a reference server, public-only
+craft_test(test_api          craft_reference) # the PUBLIC surface, and ONLY it -- the canary that include/ suffices
+craft_test(test_tcp_builder  craft_reference) # craft/tcp.hpp: connect() a client to a reference server
 craft_test(test_memory       craft_reference)
 craft_test(test_dlsn_tracker craft_client)
-target_include_directories(test_dlsn_tracker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # white-box: internal dlsn_tracker.hpp
 craft_test(test_cluster      craft_reference)
 craft_test(test_tcp          craft_reference)
 craft_test(test_tcp_replica  craft_reference)
 craft_test(test_async_mem    craft_reference) # the on-ring async transport (prepare_for_async) driven at depth
-target_include_directories(test_async_mem PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # white-box: tracker_stats fields
 craft_test(test_async_tcp    craft_reference) # the on-ring TCP transport (recv-demux pump) over real loopback sockets
-target_include_directories(test_async_tcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # white-box: tracker_stats fields
+
+# Every suite EXCEPT test_wire / test_types / test_api reaches an internal header under src/ -- the reference
+# model, the TCP server/proxy, the craft_replica interface, the dlsn_tracker. That is the point of the split:
+# those types are NOT on the public surface, so only in-repo code may name them. test_api is deliberately left
+# out: it must compile against include/ alone, and it fails loudly if the public surface ever stops sufficing.
+foreach(t test_tcp_builder test_memory test_dlsn_tracker test_cluster test_tcp test_tcp_replica
+          test_async_mem test_async_tcp)
+  target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+endforeach()
 
 # test_client / test_client_tcp carry their own main() + SISL_LOGGING_DEF (no shared main).
 function(craft_test_ownmain name)

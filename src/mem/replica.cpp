@@ -13,8 +13,8 @@
  *
  *********************************************************************************/
 
-#include <craft/mem/replica.hpp>
-#include <craft/mem/cluster.hpp> // the full MemTransport type
+#include "mem/replica.hpp"
+#include "mem/cluster.hpp" // the full MemTransport type
 
 #include <algorithm>
 #include <cstring>

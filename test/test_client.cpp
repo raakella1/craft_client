@@ -33,10 +33,10 @@
 #include <sisl/logging/logging.h>
 #include <sisl/options/options.h>
 
-#include <craft/replica.hpp>
+#include "craft_replica.hpp"
 
 #include "craft_test_util.hpp"
-#include <craft/mem/cluster.hpp> // make_mem_replica_group, MemReplicaGroup, mem_replica_id
+#include "mem/cluster.hpp" // make_mem_replica_group, MemReplicaGroup, mem_replica_id
 #include <craft/client.hpp>
 #include <client_impl.hpp> // white-box: the concrete craft_client
 #include <read_route_map.hpp>
@@ -193,10 +193,10 @@ TEST(CraftClient, N3_FailedWriteDoesNotLeakIntoReads) {
     auto v1 = page_of(0x11);
     auto v2 = page_of(0x12);
 
-    ASSERT_TRUE(wr(*cl.client, 4, v0));   // dLSN 0: durable at block 4
+    ASSERT_TRUE(wr(*cl.client, 4, v0)); // dLSN 0: durable at block 4
     EXPECT_EQ(cl.client->commit_lsn(), 0);
-    write_subquorum_unhealed(cl, 4, v1);  // dLSN 1: unresolved (round dead), replica 1 HOLDS it
-    ASSERT_TRUE(wr(*cl.client, 9, v2));   // dLSN 2: acks, pushing the horizon above the hole
+    write_subquorum_unhealed(cl, 4, v1); // dLSN 1: unresolved (round dead), replica 1 HOLDS it
+    ASSERT_TRUE(wr(*cl.client, 9, v2));  // dLSN 2: acks, pushing the horizon above the hole
 
     EXPECT_EQ(cl.client->commit_lsn(), 0) << "commit must stay pinned beneath the unresolved dLSN 1";
     EXPECT_EQ(cl.client->read_horizon(), 2);

@@ -28,8 +28,8 @@
 #include <gtest/gtest.h>
 
 #include <craft/net/conn.hpp>
-#include <craft/net/tcp_client.hpp>
-#include <craft/net/tcp_server.hpp>
+#include "net/tcp_client.hpp"
+#include "net/tcp_server.hpp"
 
 using namespace craft::net;
 namespace wire = craft::wire;

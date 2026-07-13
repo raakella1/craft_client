@@ -22,7 +22,7 @@
 
 #include <algorithm>
 
-#include <craft/mem/cluster.hpp> // make_mem_replica_group, MemReplicaGroup (+ MemCraftReplica fault knobs)
+#include "mem/cluster.hpp" // make_mem_replica_group, MemReplicaGroup (+ MemCraftReplica fault knobs)
 
 namespace craft {
 

@@ -17,7 +17,7 @@
 // MemTransport's cold path (run_login / run_logout) for the faked-RAFT session orchestration, and the srv_*
 // seam for the IO data plane. References no homestore SYMBOL, so it still links without the engine.
 
-#include <craft/net/cluster_server.hpp>
+#include "net/cluster_server.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -32,9 +32,9 @@
 #include <thread>
 #include <utility>
 
-#include <craft/mem/cluster.hpp> // MemReplicaGroup, MemTransport::run_login/run_logout
-#include <craft/mem/replica.hpp> // MemCraftReplica srv_* seam (+ sisl::sg_list via sisl/fds/buffer.hpp)
-#include <craft/status.hpp>      // to_wire_status (the shared wire <-> craft_error bridge)
+#include "mem/cluster.hpp"  // MemReplicaGroup, MemTransport::run_login/run_logout
+#include "mem/replica.hpp"  // MemCraftReplica srv_* seam (+ sisl::sg_list via sisl/fds/buffer.hpp)
+#include <craft/status.hpp> // to_wire_status (the shared wire <-> craft_error bridge)
 
 namespace craft::net {
 

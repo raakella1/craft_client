@@ -45,8 +45,8 @@
 
 #include <sisl/async/shared_awaitable.hpp>
 
-#include <craft/replica.hpp> // the craft_replica interface + async_result/async_status + domain types
-#include <craft/net/tcp_client.hpp>
+#include "craft_replica.hpp" // the craft_replica interface + async_result/async_status + domain types
+#include "net/tcp_client.hpp"
 
 namespace craft {
 

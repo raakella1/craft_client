@@ -34,7 +34,7 @@
 #include <craft/client.hpp>
 #include <client_impl.hpp> // white-box: the concrete craft_client
 #include "craft_test_util.hpp"
-#include <craft/net/tcp_set.hpp> // make_tcp_replica_set (server + proxies, no volumes)
+#include "net/tcp_set.hpp" // make_tcp_replica_set (server + proxies, no volumes)
 
 SISL_LOGGING_DEF(homeblocks)
 SISL_LOGGING_INIT(homeblocks)

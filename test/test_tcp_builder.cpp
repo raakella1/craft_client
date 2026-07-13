@@ -25,9 +25,9 @@
 
 #include <gtest/gtest.h>
 
-#include <craft/client.hpp>             // the opaque handle + the free-function verbs
-#include <craft/tcp.hpp>                // make_tcp_cluster -- the PUBLIC builder under test
-#include <craft/net/cluster_server.hpp> // the reference server to connect to (test-support)
+#include <craft/client.hpp>       // the opaque handle + the free-function verbs
+#include <craft/tcp.hpp>          // make_tcp_cluster -- the PUBLIC builder under test
+#include "net/cluster_server.hpp" // the reference server to connect to (test-support)
 
 #include "craft_test_util.hpp" // PAGE, blk, page_of, one_iov, rg
 

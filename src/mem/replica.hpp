@@ -35,7 +35,7 @@
 #include <string>
 #include <vector>
 
-#include <craft/replica.hpp> // craft_replica interface + CRAFT data types
+#include "craft_replica.hpp" // craft_replica interface + CRAFT data types
 
 namespace craft {
 
@@ -161,8 +161,7 @@ public:
                                  std::shared_ptr< std::vector< uint8_t > > bytes) {
         return do_write(hdr, dlsn, addr, len, std::move(bytes));
     }
-    result< read_result > srv_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
-                                   sisl::sg_list dest) {
+    result< read_result > srv_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len, sisl::sg_list dest) {
         return do_read(hdr, read_lsn, addr, len, std::move(dest));
     }
     result< lsn_pair > srv_keep_alive(client_hdr hdr) { return do_keep_alive(hdr); }
@@ -238,11 +237,11 @@ private:
 
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.
-    std::optional< MemJournalSlot > peek_slot(int64_t dlsn);        // copy of the slot, or nullopt if absent
-    void cold_install_slot(int64_t dlsn, MemJournalSlot s);         // fill a hole; never overwrites an entry
-    void cold_mark_empty(int64_t dlsn);                             // Empty verdict tombstone; overwrites held
-                                                                    // data (reconciliation: Empty beats data)
-    std::vector< int64_t > peek_empties(int64_t upto);              // every is_empty dLSN <= upto
+    std::optional< MemJournalSlot > peek_slot(int64_t dlsn); // copy of the slot, or nullopt if absent
+    void cold_install_slot(int64_t dlsn, MemJournalSlot s);  // fill a hole; never overwrites an entry
+    void cold_mark_empty(int64_t dlsn);                      // Empty verdict tombstone; overwrites held
+                                                             // data (reconciliation: Empty beats data)
+    std::vector< int64_t > peek_empties(int64_t upto);       // every is_empty dLSN <= upto
 
     // Test observability: how many reads this replica actually served. Lets a test witness read routing
     // (e.g. round-robin distribution across members). Not part of the CRAFT surface.

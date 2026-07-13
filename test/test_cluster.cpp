@@ -26,9 +26,9 @@
 
 #include <gtest/gtest.h>
 
-#include <craft/net/cluster_server.hpp>
+#include "net/cluster_server.hpp"
 #include <craft/net/conn.hpp>
-#include <craft/net/tcp_client.hpp>
+#include "net/tcp_client.hpp"
 
 using namespace craft::net;
 namespace wire = craft::wire;

@@ -30,8 +30,8 @@
 #include <memory>
 #include <vector>
 
-#include <craft/replica.hpp> // craft_replica + make_client
-#include <craft/types.hpp>   // volume_id_t, replica_endpoint
+#include <craft/client.hpp> // client_handle + make_client + the OPAQUE craft_replica fwd-decl
+#include <craft/types.hpp>  // volume_id_t, replica_endpoint
 
 namespace craft {
 

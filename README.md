@@ -27,9 +27,9 @@ a byte range) and reads are sparse (data extents + holes; zeros never cross the 
 | Component | What it is | Depends on |
 |---|---|---|
 | **`craft_wire`** | The on-wire codec -- packed little-endian message framing, CRC32C digests, extent scatter. A **std-only leaf** (the future standalone dependency). | -- (std) |
-| **`craft_types`** | The domain vocabulary (`lsn_pair`, `io_extent`, `client_hdr`, `LoginResult`, `craft_error`, `peer_id_t`) + the `async_result` aliases + the `craft_replica` backend interface + `make_client`. Header-only. | sisl, boost |
-| **`craft_client`** | The client behind the opaque handle: dLSN assignment, quorum broadcast, read routing + failover, login/redirect -- driven by free functions, over a pluggable `craft_replica` transport. Plus the io_uring TCP transport. | craft_wire, craft_types, sisl, liburing |
-| **`craft_reference`** | An in-memory reference `craft_replica` + a loopback cluster server, so the client can be driven end-to-end with **no storage engine**. Also hosts the public in-process builder (`craft/local.hpp`). Test/dev-support. | craft_client |
+| **`craft_types`** | The domain vocabulary (`lsn_pair`, `io_extent`, `client_hdr`, `LoginResult`, `craft_error`, `peer_id_t`) + the `async_result` aliases. Header-only, and the **only** thing a storage backend needs. | sisl, boost |
+| **`craft_client`** | The client behind the opaque handle: dLSN assignment, quorum broadcast, read routing + failover, login/redirect -- driven by free functions, over pluggable `craft_replica` backends. Plus the io_uring TCP transport. | craft_wire, craft_types, sisl, liburing |
+| **`craft_reference`** | An in-memory reference `craft_replica` + a loopback cluster server + a TCP server, so the client can be driven end-to-end with **no storage engine**. Reached publicly only through the in-process builder (`craft/local.hpp`). Test/dev-support. | craft_client |
 
 The result vocabulary itself (`result<T>` / `async_result<T>`) is owned by **sisl** (`sisl::result`,
 `sisl::async::result`) -- the same type HomeStore and nuraft_mesg use -- so a domain error (`craft_error`) rides
@@ -38,24 +38,32 @@ the type-erased `std::error_condition` and no layer forks the vocabulary.
 ## Public API surface
 
 The client is an **opaque handle + free-function verbs** -- a driver never sees the `craft_client` type, and the
-construction seam is separate so the *transport* (not the client) is what varies. The surface is intentionally
-tiny, split by who needs what:
+construction seam is separate so the *backend* (not the client) is what varies. The surface is intentionally
+tiny, split by **three disjoint audiences**:
+
+**`include/craft/` is the whole of it -- seven headers.** Everything else (the `craft_replica` interface, the
+reference model, the TCP proxy/client/server) lives under `src/` and is not shipped in the package at all:
 
 | Header | Audience | Contents |
 |---|---|---|
-| `craft/types.hpp` | everyone | the vocabulary + `async_result` aliases |
-| `craft/client.hpp` | **drivers** (e.g. a ublk disk) | `client_handle` + `login`/`write`/`read`/`flush`/`logout`/`drive_keepalives` + observers |
-| `craft/replica.hpp` | **transport authors** (e.g. HomeStore) | the `craft_replica` interface + `make_client(backends)` |
-| `craft/tcp.hpp`, `craft/local.hpp` | assembling a binary | backend builders `make_tcp_cluster` / `make_local_cluster` → an **opaque handle**; `backends(handle)` feeds `make_client` |
-| `craft/wire.hpp`, `craft/status.hpp` | **server / protocol** authors (the future CraftConnector) | the codec + the wire↔`craft_error` bridge |
+| `craft/types.hpp` | everyone (and a **storage backend**'s only dependency) | the vocabulary + `async_result` aliases |
+| `craft/client.hpp` | **drivers** -- a ublk disk, a test, an app | `client_handle` + `make_client` + `login`/`write`/`read`/`flush`/`logout`/`drive_keepalives` + observers |
+| `craft/tcp.hpp`, `craft/local.hpp` | **drivers**, assembling a binary | backend builders `make_tcp_cluster` / `make_local_cluster` → an **opaque handle**; `backends(handle)` feeds `make_client` |
+| `craft/wire.hpp`, `craft/status.hpp` | **server authors** (the future `CraftConnector`) | the codec + the wire↔`craft_error` bridge |
+| `craft/net/conn.hpp` | **server authors** | the socket + message framing (`recv_message` / `send_all`) a wire server terminates on |
+
+`craft_replica` is **opaque even to a driver**: `craft/client.hpp` only forward-declares it, and a driver passes the
+builder's `std::vector<std::shared_ptr<craft_replica>>` straight to `make_client` without ever naming or
+dereferencing one (a `shared_ptr` type-erases its deleter at construction, inside the builder). The `test_api`
+suite compiles against `include/` alone and exists to fail loudly if the public surface ever stops sufficing.
 
 A consumer never names the client type -- it picks a backend builder, hands its backends to `make_client`, and drives
-the handle with the verbs. The builder is an RAII **owner** of the transport; keep it alive for (and destroy it
+the handle with the verbs. The builder is an RAII **owner** of the backends; keep it alive for (and destroy it
 after) the client:
 
 ```cpp
 auto cluster = craft::make_tcp_cluster(endpoints, vol_id); // <craft/tcp.hpp> -- or make_local_cluster(...)
-auto c = craft::make_client(craft::backends(cluster));     // <craft/replica.hpp> -- the one construction seam
+auto c = craft::make_client(craft::backends(cluster));     // <craft/client.hpp> -- the one construction seam
 co_await craft::login(c, token);                           // <craft/client.hpp> -- verbs over the handle
 co_await craft::write(c, addr, len, buf);
 ```
@@ -64,9 +72,57 @@ Every builder follows the client's shape: an **opaque handle + free functions**,
 surface (`make_local_cluster` also exposes `force_subquorum(handle, ...)` / `set_replica_up(handle, ...)` fault
 verbs the same way).
 
-The **only variable is the transport** behind the handle: a transport author implements `craft_replica`
-(TCP sockets, the in-process reference, or a HomeStore-API adapter) and hands the backends to `make_client`.
-The `craft_client` class itself, `dlsn_tracker`, `read_route_map`, and the io_uring transport all live in
+### `craft_replica` is the CLIENT'S view of a member -- not a storage contract
+
+This is the seam's most-mistaken point, so it is worth stating flatly: **a production storage backend never
+implements `craft_replica`, never calls `make_client`, and never links this package's client at all.** Everything
+above is the *initiator* side of the wire.
+
+`craft_replica` is "one member, as the client addresses it", and exactly two kinds of thing implement it:
+
+- a **transport proxy** -- holds no state, marshals each verb onto a wire and unmarshals the reply
+  (`CraftTcpReplica`). This is the **near half** of a transport, and it is the only implementation that ships in a
+  production binary.
+- the **in-process reference** (`MemCraftReplica`) -- a stand-in that lets the client be driven end-to-end with no
+  wire and no storage engine at all (`make_local_cluster`). Test/dev support.
+
+The real storage sits on the **far side of a wire, always**, and is reached only through a server:
+
+| Half | In-tree example | Needs |
+|---|---|---|
+| **near** -- the `craft_replica` proxy the client holds | `CraftTcpReplica` + the `make_tcp_cluster` builder | the interface (`src/craft_replica.hpp`) + `craft/wire.hpp` (encode) + `craft/status.hpp` (reply status byte → `craft_error`) |
+| **far** -- a server that terminates the wire and calls the backend's own API | `craft_tcp_server` (over the reference model) | `craft/wire.hpp` (decode) + `craft/status.hpp` (`craft_error` → status byte) + `craft/net/conn.hpp` (framing) + **the backend's surface, whatever it is** |
+
+Note the asymmetry: the **far** half needs nothing but the public codec, so `CraftConnector` links `craft_wire` and
+terminates on `craft_conn` without ever seeing this package's client. The **near** half is internal, because every
+transport that will exist lives in this repo -- adding one (RDMA, Homa) means adding a proxy under `src/net/` and a
+builder header, not implementing an exported interface.
+
+Both halves belong to the **transport author**. The **backend author** (HomeBlocks) writes neither: it exposes its
+own per-replica API and a wire server adapts to it. HomeBlocks depends on this package only for `craft_wire` +
+`craft_types` -- the vocabulary and the codec -- and *never* for the client.
+
+> **Each backend fronts its own server; they share the codec, not an interface.** `craft_tcp_server` hardwires
+> `MemCraftReplica` and calls its concrete `srv_*` methods. HomeBlocks' `CraftConnector` will adapt this server to
+> call the HomeBlocks per-replica API instead (`get_replica(volume_id)` → an opaque handle → the free-function
+> verbs), keeping HomeBlocks' own API -- not a C++ interface from this package -- as the boundary. The shared part
+> is `craft/wire.hpp` + `craft/status.hpp`; the per-backend part is the handful of `on_*` handlers. So **the wire is
+> what forces the two servers to agree**, and nothing else does.
+>
+> Note the term does **not** originate in the server. A real backend answers LOGIN from its RAFT leader and returns
+> the session term, so the connector *forwards* LOGIN and then stamps the returned term on subsequent IO. The
+> reference server mints `next_term_++` itself only because `MemCraftReplica` has no leader to ask.
+
+> **The far half has no declared interface.** `craft_tcp_server` calls `MemCraftReplica`'s concrete `srv_*` methods;
+> a HomeBlocks CRAFT server would call HomeBlocks' own per-replica API. The verb set is the same shape --
+> `establish(token, term)` / `end()` / `write` / `read` / `keep_alive` / `resolve` / `lsns` -- but it is **not**
+> `craft_replica` verbatim: session establishment is the *server's* job (it assigns the term on LOGIN/HELO and
+> pushes it down), and the peer-facing verbs (`fetch_data` / `truncate` / `get_rs_commit_lsn`) never cross the
+> client wire. Nothing in this package forces the two servers to agree on that surface; **only the wire does.**
+> (The reference needs a separate `srv_*` seam only because its `craft_replica` methods route through
+> `MemTransport`, the model's stand-in network -- which a real wire replaces. A real backend has no such detour.)
+
+The `craft_client` class itself, `dlsn_tracker`, `read_route_map`, and the io_uring TCP internals all live in
 `src/` -- never installed, never on the surface.
 
 ## The client model
@@ -102,22 +158,20 @@ Sanitizers: add `-o sanitize=address` (or `thread`) to the `conan install`.
 
 ## Relationship to HomeBlocks and ublkpp
 
-There are two integration seams, and HomeBlocks can sit behind either:
+The three roles map cleanly onto three repos, and **HomeBlocks is only ever the backend**:
 
-- **Transport seam (`craft_replica` + `make_client`).** A transport author implements `craft_replica` and hands
-  the backends to `make_client` -- the client never changes. Two builders ship: `make_tcp_cluster` (real
-  remote servers over io_uring TCP) and `make_local_cluster` (the in-process reference, no server/no wire);
-  HomeStore adds its own `make_homeblocks_client()` that builds in-process, homeblocks-API-backed replicas.
-  HomeBlocks also depends back on `craft_wire` + `craft_types` for its public CRAFT vocabulary, and on
-  `craft_reference` for its volume-level e2e test.
-- **Server seam (`craft_wire` + `craft/status.hpp`).** An ordinary TCP client speaks the wire to *any*
-  wire-speaking server. A HomeBlocks CRAFT server (the future `CraftConnector`) decodes the wire request and
-  translates it to a HomeBlocks API call -- structurally identical to the reference `cluster_server`, just backed
-  by HomeBlocks. The client has no idea what's on the other end.
-
-- **ublkpp**'s `craft_disk` is written once against the driver surface (`client_handle` + the verbs) and is
-  **agnostic to what's behind the handle** -- standalone it drives the reference over TCP/in-process; on the
-  HomeBlocks side the handle carries a HomeBlocks-backed transport. `craft_client` knows nothing about ublk.
+- **HomeBlocks is the replica -- the far side of the wire, never a client.** It exposes its own per-replica CRAFT
+  API (free functions over a `volume_handle`, backed by `CraftReplDev`) and a wire-speaking server (the planned
+  `CraftConnector`) adapts wire requests onto it -- structurally what `craft_tcp_server` does over the reference
+  model. **`make_client` never appears in the HomeBlocks repo**, and no HomeBlocks class implements `craft_replica`.
+  Its dependency here is `craft_wire` + `craft_types` only: the codec and the vocabulary.
+- **The transport is the middle, and it is written once.** `CraftTcpReplica` + `make_tcp_cluster` (the near half)
+  are already generic -- they do not care what is behind the socket. So HomeBlocks integration is *only* the far
+  half: a server that decodes the wire and calls the HomeBlocks API. The client will not know the difference.
+- **ublkpp's `craft_disk` is the driver.** Written once against the driver surface (`client_handle` + the verbs), it
+  is agnostic to everything below: standalone it drives the reference model in-process or over TCP; against
+  HomeBlocks the same handle carries the same TCP proxy, pointed at a HomeBlocks server. `craft_client` knows
+  nothing about ublk.
 
 ## Documentation
 

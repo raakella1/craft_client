@@ -13,7 +13,7 @@
  *
  *********************************************************************************/
 #include <craft/client.hpp>  // the opaque handle + the free-function declarations
-#include <craft/replica.hpp> // make_client
+#include "craft_replica.hpp" // make_client
 
 #include <utility>
 #include <vector>
@@ -87,8 +87,8 @@ async_status craft_client::login(uint64_t client_token) {
 // EVERY leg matters: the fold needs to know when all legs finished before it decides a member missed the
 // write. Exceptions are swallowed as a non-ack so a throwing leg still reports its completion.
 static async_result< lsn_pair > write_leg(std::shared_ptr< craft_replica > h, std::shared_ptr< read_route_map > route,
-                                          client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
-                                          sisl::sg_list data, std::size_t idx) {
+                                          client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data,
+                                          std::size_t idx) {
     result< lsn_pair > r = std::unexpected(make_error_condition(craft_error::REPLICA_DOWN));
     try {
         r = co_await h->write(hdr, dlsn, addr, len, std::move(data));

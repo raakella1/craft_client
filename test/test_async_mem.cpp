@@ -38,10 +38,10 @@
 #include <sisl/async/cqe_state.hpp> // is_managed / decode_managed_user_data + complete_cqe_state (the reap contract)
 #include <sisl/async/coro.hpp>      // sisl::async::detach
 
-#include <craft/client.hpp>      // client_handle + verbs + prepare_for_async
-#include <craft/replica.hpp>     // make_client
-#include <craft/mem/cluster.hpp> // make_mem_replica_group (the reference set + its replicas)
-#include <craft/mem/replica.hpp> // MemCraftReplica::set_delay / stats()
+#include <craft/client.hpp>  // client_handle + verbs + prepare_for_async
+#include "craft_replica.hpp" // make_client
+#include "mem/cluster.hpp"   // make_mem_replica_group (the reference set + its replicas)
+#include "mem/replica.hpp"   // MemCraftReplica::set_delay / stats()
 
 #include "craft_test_util.hpp" // rg (sync_get, for the pool-path login), PAGE, blk, one_iov, page_of
 #include "dlsn_tracker.hpp"    // white-box: tracker_stats fields (issued / unresolved_count) for the depth proof

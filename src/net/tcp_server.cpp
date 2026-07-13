@@ -17,15 +17,15 @@
 // (MemCraftReplica) and speaks its domain types (client_hdr, lsn_pair, io_extent, craft_error). It references
 // no homestore SYMBOL, so it still links without the engine (see test_craft_tcp).
 
-#include <craft/net/tcp_server.hpp>
+#include "net/tcp_server.hpp"
 
 #include <algorithm>
 #include <utility>
 
 #include <sisl/logging/logging.h> // server-side r/w trace (base module; visible with -v trace / when a consumer inits logging)
 
-#include <craft/mem/replica.hpp> // the full MemCraftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
-#include <craft/status.hpp>      // to_wire_status (the shared wire <-> craft_error bridge)
+#include "mem/replica.hpp"  // the full MemCraftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
+#include <craft/status.hpp> // to_wire_status (the shared wire <-> craft_error bridge)
 
 namespace craft::net {
 

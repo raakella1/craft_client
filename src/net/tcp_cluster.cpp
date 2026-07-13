@@ -24,7 +24,7 @@
 
 #include <craft/tcp.hpp>
 
-#include <craft/net/tcp_replica.hpp> // CraftTcpReplica (internal)
+#include "net/tcp_replica.hpp" // CraftTcpReplica (internal)
 
 namespace craft {
 

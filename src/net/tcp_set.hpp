@@ -28,8 +28,8 @@
 #include <memory>
 #include <vector>
 
-#include <craft/net/cluster_server.hpp>
-#include <craft/net/tcp_replica.hpp>
+#include "net/cluster_server.hpp"
+#include "net/tcp_replica.hpp"
 
 namespace craft {
 

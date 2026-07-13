@@ -13,7 +13,7 @@
  *
  *********************************************************************************/
 
-#include <craft/mem/cluster.hpp>
+#include "mem/cluster.hpp"
 
 #include <algorithm>
 #include <limits>

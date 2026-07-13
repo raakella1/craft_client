@@ -15,14 +15,14 @@
 #pragma once
 
 // The CRAFT client's driver-facing API: an OPAQUE handle + free-function verbs. A driver (e.g. a ublk disk)
-// includes only this + <craft/types.hpp>, holds a client_handle, and calls login / write / read / flush /
-// logout. The handle carries a transport behind it; a driver never constructs one -- construction lives in a
-// transport header (make_client in <craft/replica.hpp>, or the backend builders in <craft/tcp.hpp> /
-// <craft/local.hpp>), and the craft_client type itself is defined only inside the library.
+// includes only this + <craft/types.hpp> + one backend builder (<craft/tcp.hpp> or <craft/local.hpp>): it picks a
+// builder, hands the builder's backends to make_client (below), and drives the returned handle with the verbs.
+// Neither craft_client nor craft_replica is ever named -- both are opaque here and defined only inside the library.
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include <sisl/fds/buffer.hpp> // sisl::sg_list
 
@@ -35,6 +35,22 @@ namespace craft {
 class craft_client; // opaque -- defined only in the library's source
 using client_handle = std::shared_ptr< craft_client >;
 struct tracker_stats; // returned by dlsn_stats(); a driver never calls it (its definition is internal)
+
+// The per-replica backend the client drives. OPAQUE to a driver: a builder hands back a vector of these and the
+// driver passes it straight to make_client, never naming or dereferencing one (a shared_ptr type-erases its
+// deleter at construction, inside the builder, so an incomplete type here is fine). The interface itself is
+// internal -- it is the CLIENT's view of a member, implemented by a transport proxy or the reference model, and a
+// storage backend neither implements it nor appears on this side of the wire.
+class craft_replica;
+
+// ── construction: the ONE seam ──
+//
+// Build a client over a transport: one backend per member, in membership order (`leader` is where login is tried
+// first; `max_inflight` sizes the tracker's winner-scan tripwire). Get the backends from a builder --
+// make_tcp_cluster (<craft/tcp.hpp>) or make_local_cluster (<craft/local.hpp>) -- and keep the builder's handle
+// alive for at least as long as the client: it OWNS the backends.
+client_handle make_client(std::vector< std::shared_ptr< craft_replica > > replicas, uint32_t leader = 0,
+                          uint32_t max_inflight = 128);
 
 // ── the driver surface (verbs over the handle) ──
 

@@ -37,7 +37,7 @@
 #include <sisl/options/options.h>
 
 #include <craft/net/conn.hpp>
-#include <craft/net/tcp_server.hpp>
+#include "net/tcp_server.hpp"
 #include <craft/wire.hpp>
 
 // A 0 default means "unset" -> resolved in code (capacity to 1 GiB, max_tx to the single-sourced wire default), so

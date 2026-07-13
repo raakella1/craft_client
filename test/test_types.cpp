@@ -18,7 +18,7 @@
 
 #include <gtest/gtest.h>
 
-#include <craft/replica.hpp> // pulls craft/types.hpp + the async aliases + the interface
+#include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases (all this suite needs)
 
 // The client-facing async aliases are exactly sisl's canonical result carrier (no fork).
 static_assert(std::is_same_v< craft::async_result< int >, sisl::async::result< int > >);

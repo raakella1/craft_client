@@ -44,7 +44,7 @@
 #include <boost/functional/hash.hpp>
 #include <sisl/async/shared_awaitable.hpp>
 
-#include <craft/mem/replica.hpp>
+#include "mem/replica.hpp"
 #include <craft/wire.hpp> // wire::k_default_max_tx (the single-sourced volume max-transfer default)
 
 namespace craft {

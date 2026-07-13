@@ -27,8 +27,8 @@
 #include <gtest/gtest.h>
 
 #include "craft_test_util.hpp" // rg (sync_get), one_iov, page_of, chdr, PAGE
-#include <craft/net/cluster_server.hpp>
-#include <craft/net/tcp_replica.hpp>
+#include "net/cluster_server.hpp"
+#include "net/tcp_replica.hpp"
 
 using namespace craft;
 using namespace craft;
