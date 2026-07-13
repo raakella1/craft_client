@@ -24,6 +24,7 @@
 extern "C" {
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h> // TCP_NODELAY
 #include <sys/socket.h>
 #include <unistd.h>
 }
@@ -103,6 +104,10 @@ void craft_async_conn::shutdown() noexcept {
 
 sisl::async::task< int > craft_async_conn::ring_connect() {
     fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd_ >= 0) { // see set_nodelay in conn.cpp: CRAFT is request/response, so Nagle only ever adds latency
+        int const one = 1;
+        ::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    }
     if (fd_ < 0) co_return -errno;
 
     sockaddr_in sa{};

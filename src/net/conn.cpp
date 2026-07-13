@@ -17,6 +17,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h> // TCP_NODELAY
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -31,6 +32,18 @@ namespace craft::net {
 namespace {
 constexpr unsigned k_ring_entries = 8; // one op in flight at a time (blocking submit-and-wait)
 constexpr std::size_t k_recv_chunk = 16 * 1024;
+
+namespace {
+// CRAFT is a strict request/response protocol: every message is a complete, self-framed unit the peer must act on
+// NOW. Nagle exists to coalesce a stream of small writes, which is precisely wrong here -- it holds a sub-MSS
+// segment until the previous one is ACKed, and the peer's delayed-ACK timer (up to 40ms) is what finally releases
+// it. That interaction is what put 50-90ms tails on reads AND keepalives. Set on every CRAFT socket: connect,
+// accept, and the on-ring data fd.
+void set_nodelay(int fd) {
+    int const one = 1;
+    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+} // namespace
 } // namespace
 
 // ── craft_conn ──
@@ -91,6 +104,7 @@ std::expected< craft_conn, net_error > craft_conn::connect(std::string const& ho
         ::close(fd);
         return std::unexpected(net_error::setup);
     }
+    set_nodelay(fd);
     if (::connect(fd, reinterpret_cast< sockaddr* >(&addr), sizeof(addr)) < 0) {
         ::close(fd);
         return std::unexpected(net_error::connect);
@@ -216,6 +230,7 @@ std::expected< craft_listener, net_error > craft_listener::bind_listen(uint16_t 
 
 std::expected< craft_conn, net_error > craft_listener::accept() {
     int const cfd = ::accept(fd_, nullptr, nullptr);
+    if (cfd >= 0) set_nodelay(cfd);
     if (cfd < 0) return std::unexpected(net_error::connect);
     return craft_conn::adopt(cfd);
 }
