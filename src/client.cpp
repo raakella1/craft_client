@@ -28,6 +28,17 @@
 
 namespace craft {
 
+// How far the router's overlay may lag the frontier before a write trims it. Mirrors dlsn_tracker's
+// k_trunc_batch: both structures are per-dLSN StreamTrackers, so both must be trimmed by whatever advances the
+// frontier -- which is the WRITE path. read() still folds exactly (fold_to(F), unbatched), so a read never sees
+// a stale horizon; this only bounds what a write leaves behind for it.
+constexpr int64_t k_fold_batch = 512;
+
+void craft_client::maybe_fold() {
+    int64_t const F = tracker_->frontier();
+    if (F - route_->folded() >= k_fold_batch) route_->fold_to(F);
+}
+
 client_hdr craft_client::make_hdr() const {
     // Every IO piggybacks the commit frontier (CRAFT has no standalone commit verb) and the set-wide reclaim
     // floor -- min commit_lsn across members, which the broadcast keep_alive maintains (the login baseline
@@ -133,6 +144,7 @@ async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg
     if (acks >= quorum()) {
         // Quorum-durable. Do NOT read `results`: children we stopped waiting for may still be writing it.
         tracker_->resolve(dlsn, slot_outcome::acked);
+        maybe_fold(); // trim the overlay here, not only on the read path
         co_return len;
     }
 
@@ -157,6 +169,7 @@ async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg
 
     bool const provably_empty = (refused == replicas_.size());
     tracker_->resolve(dlsn, provably_empty ? slot_outcome::empty : slot_outcome::failed);
+    maybe_fold();
     // A failed (sub-quorum, not provably-absent) slot pins the frontier until the leader fills or Empties it:
     // request the resolution round NOW (the design's client-request SyncRSCommitLSN trigger) instead of
     // waiting for a watchdog / periodic cadence that the client cannot see.

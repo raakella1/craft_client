@@ -67,6 +67,13 @@ public:
 private:
     client_hdr make_hdr() const;
     std::size_t quorum() const { return replicas_.size() / 2 + 1; }
+    // Trim the router's overlay from the WRITE path, exactly as dlsn_tracker batch-truncates its own
+    // StreamTracker on resolve (k_trunc_batch). Without this, read_route_map::fold_to() is reached ONLY from
+    // read(), so a write-only stream grows the overlay without bound and the first read after a burst pays to
+    // fold all of it at once (measured: 271us of eligible() scan after 64Ki unfolded writes, vs 0.13us folded).
+    // Batched on purpose: folded() is one relaxed atomic load, so a write off the batch boundary costs nothing,
+    // while fold_to() itself would take the overlay's shared_lock every time.
+    void maybe_fold();
     std::optional< std::error_condition > precheck(uint64_t addr, uint64_t len) const;
     async_result< lsn_pair > issue_plan(std::shared_ptr< craft_replica > const& target, client_hdr hdr,
                                         read_plan const& plan, uint64_t addr, uint64_t len, sisl::sg_list& dest);
