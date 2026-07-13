@@ -15,12 +15,12 @@
 #pragma once
 
 // CraftTcpReplica: the client-side transport adapter -- a craft_replica implemented over the wire-only
-// craft_tcp_client. It is the initiator: craft_client holds N of these (or N MemCraftReplicas for the no-wire
+// wire_client. It is the initiator: craft_client holds N of these (or N MemCraftReplicas for the no-wire
 // tier) and never knows the difference, exactly like a RAID1/iSCSI split. Every wire reply is mapped here to
 // the homeblocks domain result (lsn_pair / io_extent / craft_error); the client speaks only the interface.
 //
 // CONCURRENCY BRIDGE. craft_client fans a write out to every replica and acks at QUORUM, leaving stragglers
-// detached -- so the per-replica ops must run concurrently. craft_tcp_client is blocking, so each op hops onto
+// detached -- so the per-replica ops must run concurrently. wire_client is blocking, so each op hops onto
 // this proxy's own worker thread (via a shared_awaitable, exactly as MemTransport::after does), runs the
 // blocking socket round-trip there, and resumes the awaiting coroutine on completion. One worker per proxy =
 // one connection driven serially, N proxies = N connections in flight. This is the shim model (never
@@ -46,7 +46,7 @@
 #include <sisl/async/shared_awaitable.hpp>
 
 #include "craft_replica.hpp" // the craft_replica interface + async_result/async_status + domain types
-#include "net/tcp_client.hpp"
+#include "net/wire_client.hpp"
 
 namespace craft {
 
@@ -91,12 +91,11 @@ public:
     // lba/capacity/term); only the data path moves onto the ring.
     void prepare_for_async(::io_uring* ring) noexcept override { ring_ = ring; }
 
-    // ── craft_replica: peer-facing (server-to-server; a client never invokes these) -- stubbed NOT_LEADER ──
-    async_result< lsn_pair > get_lsns() override;
-    async_result< lsn_pair > get_rs_commit_lsn() override;
-    async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
-    async_status truncate(int64_t lsn) override;
     peer_id_t id() const override { return id_; }
+
+    // No peer-plane verbs here, by construction: this is a CLIENT-side proxy, and the peer plane's caller is a
+    // replica applying a RAFT entry (see craft_peer.hpp). It used to carry four NOT_LEADER stubs it could never
+    // honor -- a proxy has no journal to hand a peer.
 
 private:
     using hop_event = sisl::async::shared_awaitable< std::monostate >;
@@ -120,7 +119,7 @@ private:
     std::array< uint8_t, 16 > vol_id_;
     std::chrono::milliseconds op_timeout_{0}; // forwarded onto conn_ at connect; 0 = block forever
 
-    net::craft_tcp_client conn_; // touched ONLY on the worker thread (login/logout: the blocking admin path)
+    net::wire_client conn_; // touched ONLY on the worker thread (login/logout: the blocking admin path)
 
     // The ON-RING data path (prepare_for_async): the caller's ring + a lazily-opened async connection over it.
     // Null ring_ => not primed => write/read/keep_alive take the blocking conn_ path above. Opened/torn down on

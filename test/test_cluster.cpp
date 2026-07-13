@@ -28,7 +28,7 @@
 
 #include "net/cluster_server.hpp"
 #include <craft/net/conn.hpp>
-#include "net/tcp_client.hpp"
+#include "net/wire_client.hpp"
 
 using namespace craft::net;
 namespace wire = craft::wire;
@@ -51,8 +51,8 @@ craft_cluster_server make_server(uint32_t n = 3) {
     return s;
 }
 
-craft_tcp_client connect_to(craft_cluster_server const& s, std::size_t idx) {
-    auto c = craft_tcp_client::connect("127.0.0.1", s.port(idx));
+wire_client connect_to(craft_cluster_server const& s, std::size_t idx) {
+    auto c = wire_client::connect("127.0.0.1", s.port(idx));
     EXPECT_TRUE(c.has_value());
     return std::move(*c);
 }
@@ -103,7 +103,7 @@ TEST(CraftCluster, GridWriteReadAcrossReplicas) {
     std::size_t const leader = server.leader_index();
 
     {
-        std::vector< craft_tcp_client > cli;
+        std::vector< wire_client > cli;
         for (std::size_t i = 0; i < 3; ++i)
             cli.push_back(connect_to(server, i));
 

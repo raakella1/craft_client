@@ -25,6 +25,11 @@
 // backend also reuses this interface as its internal volume->engine vtable is its own business; the client never
 // sees it.
 //
+// EXACTLY the wire's client ops (wire::op 1..14), 1:1 -- six verbs, no more. The peer plane (a replica's view of
+// another replica: get_lsns / fetch_data / truncate, driven by a RAFT commit) is a DIFFERENT interface with a
+// different caller and no allocated opcodes; it lives in craft_peer.hpp. Keeping the two apart is the point: a
+// client never calls a peer verb, and a client-side proxy could never answer one.
+//
 // Engine-free: only craft/types.hpp + sisl (result / async::result carrier + sg_list). No storage engine.
 
 #include <cstdint>
@@ -39,35 +44,6 @@
 struct io_uring; // liburing (fwd-decl only: the on-ring data-path seam is a pointer, see prepare_for_async)
 
 namespace craft {
-
-// ── internal / peer-only data types (deliberately NOT on the public client surface) ──
-
-// Per-partition CRAFT state (internal to a replica implementation). Authoritative in memory; the
-// production impl recovers it from the journal + superblock on restart (the reference model does not).
-struct CraftPartitionState {
-    int64_t commit_lsn{-1};      // contiguous committed prefix (== Synced)
-    int64_t last_append_lsn{-1}; // highest appended dLSN (may be uncommitted)
-    uint64_t client_token{0};    // token from the last successful InternalLogin
-    uint64_t term{0};            // current session term
-};
-
-// Block-addressing units for the replica-side journal/index representation. The CRAFT client API and wire are
-// byte-based (raw uint64_t addr/len); only JournalSlot (below) and the reference model's per-block index speak
-// these block units, so they live here with the peer/journal types, not in the client vocab (craft/types.hpp).
-using lba_t = uint64_t;
-using lba_count_t = uint32_t;
-
-// One journal slot returned by fetch_data() (server-to-server resync; not client-facing). Four-way:
-// data (is_empty=false, all_zeros=false), zero write (all_zeros=true, no data), Empty (is_empty=true),
-// or omitted from the response (not-present-here).
-struct JournalSlot {
-    int64_t lsn{-1};
-    bool is_empty{false};
-    bool all_zeros{false};
-    lba_t lba{0};
-    lba_count_t len{0};
-    sisl::sg_list data{};
-};
 
 class craft_replica {
 public:
@@ -127,17 +103,11 @@ public:
     // owner's reap loop dispatches -- so many ops go in flight at once (QD>1) on the caller's thread.
     virtual void prepare_for_async(::io_uring* /*ring*/) noexcept {}
 
-    // ── peer-facing (server-to-server; driven by the cold path / resync, never by a client) ──
-
-    // Snapshot {commit_lsn, last_append_lsn} for this replica -- used by the leader during
-    // GetRSCommitLSN polls and SyncRSCommitLSN rounds; identical to what keep_alive returns.
-    virtual async_result< lsn_pair > get_lsns() = 0;
-    virtual async_result< lsn_pair > get_rs_commit_lsn() = 0;
-    virtual async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) = 0;
-    virtual async_status truncate(int64_t lsn) = 0;
-
     // This replica's endpoint id (for routing / membership).
     virtual peer_id_t id() const = 0;
+
+    // NOTE: the peer-facing verbs (get_lsns / get_rs_commit_lsn / fetch_data / truncate) deliberately do NOT live
+    // here. Their caller is a REPLICA applying a RAFT entry, not a client -- see craft_peer.hpp.
 };
 
 } // namespace craft

@@ -35,11 +35,22 @@
 #include <string>
 #include <vector>
 
-#include "craft_replica.hpp" // craft_replica interface + CRAFT data types
+#include "craft_peer.hpp"    // the PEER plane: craft_peer + JournalSlot + lba_t (this model is its only implementer)
+#include "craft_replica.hpp" // the CLIENT plane: the craft_replica interface
 
 namespace craft {
 
 class MemTransport; // in-process network + cold path
+
+// Per-partition CRAFT state, internal to a replica implementation. Authoritative in memory; a production replica
+// recovers it from the journal + superblock on restart (this model does not). Not on either plane's interface --
+// it is one implementation's state, which is why it lives here and HomeBlocks keeps its own copy.
+struct CraftPartitionState {
+    int64_t commit_lsn{-1};      // contiguous committed prefix (== Synced)
+    int64_t last_append_lsn{-1}; // highest appended dLSN (may be uncommitted)
+    uint64_t client_token{0};    // token from the last successful InternalLogin
+    uint64_t term{0};            // current session term
+};
 
 // A read-only snapshot of one replica's CRAFT state, for observability (the craft_ublk REST endpoint and
 // the model unit test). Pure data: no HomeStore, no JSON, nothing on the protocol path reads it.
@@ -92,7 +103,13 @@ struct replica_faults {
 // thread. That closure must hold a WEAK reference here (a strong one would cycle: replica -> net_ -> closure
 // -> replica), so the replica must be reachable as a shared_ptr. It always is; make_mem_replica_group is the
 // only constructor caller and it uses make_shared.
-class MemCraftReplica final : public craft_replica, public std::enable_shared_from_this< MemCraftReplica > {
+// Implements BOTH planes -- and is currently the only thing that implements the peer plane at all. That is not an
+// accident of the model: a real replica is exactly the thing that can answer both "serve this client's read" and
+// "hand a peer the journal slot it is Missing". A client-side transport proxy (CraftTcpReplica) implements only
+// craft_replica, because a client never asks a peer question.
+class MemCraftReplica final : public craft_replica,
+                              public craft_peer,
+                              public std::enable_shared_from_this< MemCraftReplica > {
 public:
     // How many Missing dLSNs stats() lists individually. The count is always exact.
     static constexpr std::size_t k_missing_sample = 16;
@@ -142,12 +159,16 @@ public:
     // fire and the ops hang. See craft_replica::prepare_for_async.
     void prepare_for_async(::io_uring* ring) noexcept override;
 
-    // ── craft_replica: peer-facing (driven by MemTransport) ──
+    // ── craft_peer: the PEER plane (a holder answering another replica, never a client) ──
+    // NOTE these are not yet reached THROUGH craft_peer: MemTransport's cold path (run_login / run_resolution) is
+    // a friend and drives the cold_* / peek_* helpers below directly. Routing it through this interface is step
+    // one of making the peer plane real; step two is allocating its opcodes (wire::op stops at 14).
     async_result< lsn_pair > get_lsns() override;
     async_result< lsn_pair > get_rs_commit_lsn() override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
     async_status truncate(int64_t lsn) override;
-    peer_id_t id() const override { return ep_.id; }
+
+    peer_id_t id() const override { return ep_.id; } // craft_replica
 
     // ── local-server surface: drive this replica directly, with an EXTERNAL transport (the TCP frontend,
     // craft_tcp_server, or any real network) as the wire. Each wraps a synchronous core WITHOUT a

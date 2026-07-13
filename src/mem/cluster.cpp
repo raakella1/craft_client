@@ -102,8 +102,7 @@ async_result< lsn_pair > MemTransport::send_write(std::shared_ptr< MemCraftRepli
 }
 
 async_result< read_result > MemTransport::send_read(std::shared_ptr< MemCraftReplica > to, client_hdr hdr,
-                                                    int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                    sisl::sg_list dest) {
+                                                    int64_t read_lsn, uint64_t addr, uint64_t len, sisl::sg_list dest) {
     // No late delivery for a read: a result nobody is waiting for is worthless. A sub-quorum fault does not
     // gate reads either -- it drops writes.
     auto const id = to->id();

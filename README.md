@@ -180,6 +180,7 @@ The three roles map cleanly onto three repos, and **HomeBlocks is only ever the 
 | [docs/wire.md](docs/wire.md) | On-wire byte encoding -- message framing, op headers, digests, extent tables. |
 | [docs/transport.md](docs/transport.md) | TCP transport binding: connection lifecycle, admission/auth, deadlines, reconnect. |
 | [docs/client-internals.md](docs/client-internals.md) | The client's hard part -- dLSN tracking, the read horizon, split reads, and what a peer's answer lets the client conclude. |
+| [docs/peer-plane.md](docs/peer-plane.md) | CRAFT's **other** plane (replica ↔ replica, driven by a RAFT commit): why it is a separate interface, and why it is deferred at the *wire* -- no opcode is allocated. |
 
 ## Key design properties
 

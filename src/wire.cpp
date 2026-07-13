@@ -18,7 +18,9 @@
 namespace craft::wire {
 
 std::optional< std::size_t > op_hdr_size(uint8_t op_code) noexcept {
-    // Indexed by op code 1..14. 0 for a status-only response (helo_rsp, logout_rsp); index 0 is unused.
+    // Indexed by op code 1..k_max_op. 0 for a status-only response (helo_rsp, logout_rsp); index 0 is unused.
+    // A peer-plane op (15+, see craft_peer.hpp) must add its row here AND bump op::k_max_op -- the static_assert
+    // below makes forgetting either one a compile error rather than an unknown_op at runtime.
     static constexpr std::size_t k[] = {
         0,                     // 0  unused
         sizeof(login_req),     // 1  login
@@ -36,17 +38,24 @@ std::optional< std::size_t > op_hdr_size(uint8_t op_code) noexcept {
         sizeof(resolve_req),   // 13 resolve
         sizeof(resolve_rsp),   // 14 resolve_rsp
     };
-    if (op_code < 1 || op_code > 14) return std::nullopt;
+    static_assert(std::size(k) == static_cast< std::size_t >(op::k_max_op) + 1,
+                  "op_hdr_size table and op::k_max_op disagree -- a new opcode was added without a header size, "
+                  "or a header size was added without raising k_max_op");
+    if (op_code < 1 || op_code > static_cast< uint8_t >(op::k_max_op)) return std::nullopt;
     return k[op_code];
 }
 
-bool is_response(uint8_t op_code) noexcept { return op_code >= 1 && op_code <= 14 && (op_code % 2 == 0); }
+// Bound off k_max_op, never a literal: a peer-plane op added at 15+ without bumping it would be silently
+// misclassified as "not a response" here rather than failing loudly.
+bool is_response(uint8_t op_code) noexcept {
+    return op_code >= 1 && op_code <= static_cast< uint8_t >(op::k_max_op) && (op_code % 2 == 0);
+}
 
 bool op_allows_body(uint8_t op_code) noexcept {
-    return op_code == static_cast< uint8_t >(op::write) ||   // data
-        op_code == static_cast< uint8_t >(op::login_rsp) ||  // member list
-        op_code == static_cast< uint8_t >(op::read_rsp) ||   // extents + data
-        op_code == static_cast< uint8_t >(op::resolve_rsp);  // Empty-verdict dLSN list
+    return op_code == static_cast< uint8_t >(op::write) ||  // data
+        op_code == static_cast< uint8_t >(op::login_rsp) || // member list
+        op_code == static_cast< uint8_t >(op::read_rsp) ||  // extents + data
+        op_code == static_cast< uint8_t >(op::resolve_rsp); // Empty-verdict dLSN list
 }
 
 namespace {

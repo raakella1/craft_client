@@ -14,7 +14,7 @@
  *********************************************************************************/
 
 // P3 increment 3: the client-side transport adapter. CraftTcpReplica implements the craft_replica interface
-// over the wire-only craft_tcp_client, driven through its worker-thread concurrency bridge. Here we drive it
+// over the wire-only wire_client, driven through its worker-thread concurrency bridge. Here we drive it
 // standalone (via detail::sync_get, off-reactor) against a cluster server -- login/write/read/keepalive/logout
 // and the follower lazy-HELO + redirect -- proving the async bridge and the wire<->domain mapping before
 // craft_client rides on top (increment 4).

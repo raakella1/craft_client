@@ -76,13 +76,13 @@ struct resolve_reply {
     std::vector< int64_t > empty_slots;
 };
 
-class craft_tcp_client {
+class wire_client {
 public:
-    craft_tcp_client() = default;
-    craft_tcp_client(craft_tcp_client&&) = default;
-    craft_tcp_client& operator=(craft_tcp_client&&) = default;
+    wire_client() = default;
+    wire_client(wire_client&&) = default;
+    wire_client& operator=(wire_client&&) = default;
 
-    static std::expected< craft_tcp_client, net_error > connect(std::string const& host, uint16_t port);
+    static std::expected< wire_client, net_error > connect(std::string const& host, uint16_t port);
 
     // ── session ──
     // LOGIN names the volume (the design's login(client_token, vol_id)): a multi-volume server routes the

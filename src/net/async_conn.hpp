@@ -43,9 +43,9 @@
 #include <sisl/async/disk_task.hpp> // disk_task<T>: the stand-alone service-loop handle (steal _coro / destroy), as ublkpp's queue_service
 #include <sisl/async/task.hpp> // sisl::async::task<T> == exec::task<T>
 
-#include <craft/net/conn.hpp> // net_error
-#include "net/tcp_client.hpp" // lsn_reply / read_reply
-#include <craft/wire.hpp>     // op / frame_message / parse_message
+#include <craft/net/conn.hpp>  // net_error
+#include "net/wire_client.hpp" // lsn_reply / read_reply
+#include <craft/wire.hpp>      // op / frame_message / parse_message
 
 namespace craft::net {
 

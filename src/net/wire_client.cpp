@@ -16,7 +16,7 @@
 // Wire-only: this TU includes only its own header (-> craft_conn + craft_wire) and the standard library. No
 // homeblocks/homestore/sisl symbol enters, so the reference client links standalone.
 
-#include "net/tcp_client.hpp"
+#include "net/wire_client.hpp"
 
 #include <cstring>
 #include <utility>
@@ -36,16 +36,16 @@ std::span< uint8_t const > as_bytes(T const& v) {
 }
 } // namespace
 
-std::expected< craft_tcp_client, net_error > craft_tcp_client::connect(std::string const& host, uint16_t port) {
+std::expected< wire_client, net_error > wire_client::connect(std::string const& host, uint16_t port) {
     auto c = craft_conn::connect(host, port);
     if (!c) return std::unexpected(c.error());
-    craft_tcp_client cli;
+    wire_client cli;
     cli.conn_ = std::move(*c);
     return cli;
 }
 
-std::expected< login_result, net_error > craft_tcp_client::login(std::array< uint8_t, 16 > const& volume_id,
-                                                                 uint64_t client_token) {
+std::expected< login_result, net_error > wire_client::login(std::array< uint8_t, 16 > const& volume_id,
+                                                            uint64_t client_token) {
     wire::login_req req{volume_id, client_token};
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::login, 0, next_rid_++, as_bytes(req), {});
@@ -73,8 +73,8 @@ std::expected< login_result, net_error > craft_tcp_client::login(std::array< uin
     return res;
 }
 
-std::expected< wire::status, net_error > craft_tcp_client::helo(std::array< uint8_t, 16 > const& volume_id,
-                                                                uint64_t client_token, uint64_t term) {
+std::expected< wire::status, net_error > wire_client::helo(std::array< uint8_t, 16 > const& volume_id,
+                                                           uint64_t client_token, uint64_t term) {
     wire::helo_req req{volume_id, client_token, term};
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::helo, 0, next_rid_++, as_bytes(req), {});
@@ -90,7 +90,7 @@ std::expected< wire::status, net_error > craft_tcp_client::helo(std::array< uint
     return st;
 }
 
-std::expected< wire::status, net_error > craft_tcp_client::logout() {
+std::expected< wire::status, net_error > wire_client::logout() {
     wire::logout_req req{{.commit_lsn = -1, .all_committed_lsn = -1}};
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::logout, 0, next_rid_++, as_bytes(req), {});
@@ -104,9 +104,9 @@ std::expected< wire::status, net_error > craft_tcp_client::logout() {
     return static_cast< wire::status >(parsed->hdr.status);
 }
 
-std::expected< lsn_reply, net_error > craft_tcp_client::write(int64_t dlsn, uint64_t addr, uint64_t len,
-                                                              std::span< uint8_t const > data, int64_t commit_lsn,
-                                                              int64_t all_committed_lsn) {
+std::expected< lsn_reply, net_error > wire_client::write(int64_t dlsn, uint64_t addr, uint64_t len,
+                                                         std::span< uint8_t const > data, int64_t commit_lsn,
+                                                         int64_t all_committed_lsn) {
     wire::write_req req{{commit_lsn, all_committed_lsn}, dlsn, addr, len};
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::write, 0, next_rid_++, as_bytes(req), data); // data is the body
@@ -122,9 +122,9 @@ std::expected< lsn_reply, net_error > craft_tcp_client::write(int64_t dlsn, uint
     return lsn_reply{static_cast< wire::status >(parsed->hdr.status), wr.commit_lsn, wr.last_append_lsn};
 }
 
-std::expected< read_reply, net_error > craft_tcp_client::read(int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                              std::span< uint8_t > dest, int64_t commit_lsn,
-                                                              int64_t all_committed_lsn) {
+std::expected< read_reply, net_error > wire_client::read(int64_t read_lsn, uint64_t addr, uint64_t len,
+                                                         std::span< uint8_t > dest, int64_t commit_lsn,
+                                                         int64_t all_committed_lsn) {
     if (dest.size() < len) return std::unexpected(net_error::invalid_argument);
 
     wire::read_req req{{commit_lsn, all_committed_lsn}, read_lsn, addr, len};
@@ -162,7 +162,7 @@ std::expected< read_reply, net_error > craft_tcp_client::read(int64_t read_lsn, 
     return reply;
 }
 
-std::expected< lsn_reply, net_error > craft_tcp_client::keep_alive(int64_t commit_lsn, int64_t all_committed_lsn) {
+std::expected< lsn_reply, net_error > wire_client::keep_alive(int64_t commit_lsn, int64_t all_committed_lsn) {
     wire::keepalive_req req{{commit_lsn, all_committed_lsn}};
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::keepalive, 0, next_rid_++, as_bytes(req), {});
@@ -178,8 +178,8 @@ std::expected< lsn_reply, net_error > craft_tcp_client::keep_alive(int64_t commi
     return lsn_reply{static_cast< wire::status >(parsed->hdr.status), ka.commit_lsn, ka.last_append_lsn};
 }
 
-std::expected< resolve_reply, net_error > craft_tcp_client::resolve(int64_t upto, int64_t commit_lsn,
-                                                                    int64_t all_committed_lsn) {
+std::expected< resolve_reply, net_error > wire_client::resolve(int64_t upto, int64_t commit_lsn,
+                                                               int64_t all_committed_lsn) {
     wire::resolve_req req{{commit_lsn, all_committed_lsn}, upto};
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::resolve, 0, next_rid_++, as_bytes(req), {});

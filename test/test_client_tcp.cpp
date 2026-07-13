@@ -15,7 +15,7 @@
 
 // P3 north star: the UNCHANGED craft_client, driven over REAL TCP. Same sequencing logic test_craft_client
 // exercises against the in-process mem model, but here each replica sits behind a CraftTcpReplica ->
-// craft_tcp_client -> socket -> cluster server -> mem model. This proves the client works over the wire:
+// wire_client -> socket -> cluster server -> mem model. This proves the client works over the wire:
 // the HEALTHY path (quorum write/read, commit advance, the keep_alive drive), P4.1 fault injection (down
 // replicas, forced sub-quorum), and P4.2 the straggler path -- ack at quorum without waiting for the slowest
 // leg, the slow write landing late intact, and reconnect + re-HELO after a per-op timeout resets a connection.

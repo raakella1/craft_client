@@ -68,6 +68,16 @@ enum class op : uint8_t {
     logout_rsp = 12,
     resolve = 13, // client-requested resolution round (leader-only)
     resolve_rsp = 14,
+
+    // 1..14 is the CLIENT plane, and it is complete: these are exactly the verbs of craft_replica.
+    //
+    // 15.. is RESERVED for the PEER plane (a replica asking another replica: get_lsns / get_rs_commit_lsn /
+    // fetch_data / truncate -- see craft_peer.hpp). Nothing is allocated yet: the peer plane is deferred at the
+    // WIRE, not merely at the transport. Two rules bind whoever allocates them:
+    //   1. keep the request=odd / response=even convention, and
+    //   2. bump k_max_op below -- is_response() is a range check, so a peer op added without it is silently
+    //      misclassified as "not a response". That is the trap this constant exists to close.
+    k_max_op = 14, // highest allocated opcode; raise when the peer plane lands
 };
 
 // Response `status` byte; 1-6 mirror craft_error (craft_types.hpp).

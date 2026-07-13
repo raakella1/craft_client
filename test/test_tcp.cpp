@@ -28,7 +28,7 @@
 #include <gtest/gtest.h>
 
 #include <craft/net/conn.hpp>
-#include "net/tcp_client.hpp"
+#include "net/wire_client.hpp"
 #include "net/tcp_server.hpp"
 
 using namespace craft::net;
@@ -75,7 +75,7 @@ void with_session(F&& body) {
     });
 
     {
-        auto cli = craft_tcp_client::connect("127.0.0.1", port);
+        auto cli = wire_client::connect("127.0.0.1", port);
         ASSERT_TRUE(cli.has_value());
         auto lr = cli->login(/*volume_id=*/{}, 0x1234); // the standalone server fronts one volume: any id binds
         ASSERT_TRUE(lr.has_value());
@@ -98,7 +98,7 @@ TEST(CraftTcp, LoginLogoutRoundTrip) {
     });
 
     {
-        auto cli = craft_tcp_client::connect("127.0.0.1", port);
+        auto cli = wire_client::connect("127.0.0.1", port);
         ASSERT_TRUE(cli.has_value());
 
         auto lr = cli->login(/*volume_id=*/{}, 0xABCD);
@@ -124,7 +124,7 @@ TEST(CraftTcp, LoginLogoutRoundTrip) {
 
 // Write two blocks, read them back at the horizon, and verify the bytes round-trip.
 TEST(CraftTcp, WriteReadBack) {
-    with_session([](craft_tcp_client& cli, login_result const&) {
+    with_session([](wire_client& cli, login_result const&) {
         auto const data = pattern(2 * k_lba);
         auto w = cli.write(/*dlsn=*/0, /*addr=*/0, /*len=*/2 * k_lba, {data.data(), data.size()}, /*commit=*/0);
         ASSERT_TRUE(w.has_value());
@@ -146,7 +146,7 @@ TEST(CraftTcp, WriteReadBack) {
 
 // Write blocks 0 and 2 but not 1; a read across all three reconstructs the middle as a zero-filled hole.
 TEST(CraftTcp, SparseReadReconstructsHoles) {
-    with_session([](craft_tcp_client& cli, login_result const&) {
+    with_session([](wire_client& cli, login_result const&) {
         auto const p0 = pattern(k_lba, 0);
         auto const p2 = pattern(k_lba, 100);
         ASSERT_TRUE(cli.write(0, 0 * k_lba, k_lba, {p0.data(), p0.size()}, /*commit=*/-1).has_value());
@@ -176,7 +176,7 @@ TEST(CraftTcp, SparseReadReconstructsHoles) {
 
 // A zero write (empty payload) unmaps its range; a later read reads it back as a zero-filled hole.
 TEST(CraftTcp, ZeroWriteReadsAsHole) {
-    with_session([](craft_tcp_client& cli, login_result const&) {
+    with_session([](wire_client& cli, login_result const&) {
         auto const p0 = pattern(k_lba);
         ASSERT_TRUE(cli.write(0, 0, k_lba, {p0.data(), p0.size()}, /*commit=*/0).has_value());
 
@@ -203,7 +203,7 @@ TEST(CraftTcp, ZeroWriteReadsAsHole) {
 
 // keep_alive advances the frontier and returns the replica's {commit_lsn, last_append_lsn}.
 TEST(CraftTcp, KeepAliveReturnsLsns) {
-    with_session([](craft_tcp_client& cli, login_result const&) {
+    with_session([](wire_client& cli, login_result const&) {
         auto const p = pattern(k_lba);
         ASSERT_TRUE(cli.write(0, 0, k_lba, {p.data(), p.size()}, /*commit=*/0).has_value());
 
@@ -218,7 +218,7 @@ TEST(CraftTcp, KeepAliveReturnsLsns) {
 // After LOGOUT, an IO on the same connection is fenced: a valid reply carrying STALE_TERM (not a transport
 // error), so the client surfaces the status in the reply, not as a net_error.
 TEST(CraftTcp, PostLogoutWriteFenced) {
-    with_session([](craft_tcp_client& cli, login_result const&) {
+    with_session([](wire_client& cli, login_result const&) {
         auto lo = cli.logout();
         ASSERT_TRUE(lo.has_value());
         EXPECT_EQ(*lo, wire::status::ok);

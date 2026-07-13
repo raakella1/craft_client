@@ -111,7 +111,7 @@ void CraftTcpReplica::worker_loop() {
 
 bool CraftTcpReplica::ensure_connected() {
     if (connected_) return true;
-    auto c = net::craft_tcp_client::connect(host_, port_);
+    auto c = net::wire_client::connect(host_, port_);
     if (!c) return false;
     conn_ = std::move(*c); // drops any prior (poisoned) client -> its ring/socket, with a stuck recv, is torn down
     conn_.set_op_timeout(op_timeout_);
@@ -313,12 +313,5 @@ async_result< resolution_result > CraftTcpReplica::request_resolution(client_hdr
 }
 
 // ── peer-facing: a client never invokes these; stubbed so the vtable is complete ──
-
-async_result< lsn_pair > CraftTcpReplica::get_lsns() { co_return fail(craft_error::NOT_LEADER); }
-async_result< lsn_pair > CraftTcpReplica::get_rs_commit_lsn() { co_return fail(craft_error::NOT_LEADER); }
-async_result< std::vector< JournalSlot > > CraftTcpReplica::fetch_data(std::vector< int64_t >) {
-    co_return fail(craft_error::NOT_LEADER);
-}
-async_status CraftTcpReplica::truncate(int64_t) { co_return fail(craft_error::NOT_LEADER); }
 
 } // namespace craft
