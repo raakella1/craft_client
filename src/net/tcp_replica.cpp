@@ -80,6 +80,7 @@ void CraftTcpReplica::shutdown() {
     // WIRE + SERVER time, per op class -- everything craft_client does is ABOVE this proxy and excluded. If the
     // read average here tracks the driver's read latency, the client is WAITING and the cost is the wire or the
     // server; if it does not, the gap is being burned above us and belongs to a profiler.
+#ifndef NDEBUG
     auto const dump = [this](char const* what, rt_stat const& s) {
         auto const n = s.count.load(std::memory_order_relaxed);
         if (n == 0) return;
@@ -96,6 +97,7 @@ void CraftTcpReplica::shutdown() {
                 static_cast< double >(aconn_->n_recv()) / static_cast< double >(aconn_->n_reply()),
                 static_cast< double >(aconn_->n_recv_bytes()) / static_cast< double >(aconn_->n_recv()));
     }
+#endif
     {
         std::lock_guard< std::mutex > g{mu_};
         stop_ = true;
