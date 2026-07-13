@@ -349,4 +349,21 @@ craft_async_conn::read(int64_t read_lsn, uint64_t addr, uint64_t len, std::span<
     co_return out;
 }
 
+sisl::async::task< std::expected< resolve_reply, net_error > >
+craft_async_conn::resolve(int64_t upto, int64_t commit_lsn, int64_t all_committed_lsn) {
+    wire::resolve_req req{{commit_lsn, all_committed_lsn}, upto};
+    auto reply = co_await round_trip(wire::op::resolve, as_bytes(req), {});
+    if (!reply) co_return std::unexpected(reply.error());
+    auto parsed = wire::parse_message(*reply, max_tx_);
+    if (!parsed || parsed->hdr.op != static_cast< uint8_t >(wire::op::resolve_rsp))
+        co_return std::unexpected(net_error::malformed);
+    auto const rr = wire::decode< wire::resolve_rsp >(parsed->op_header);
+    resolve_reply out{static_cast< wire::status >(parsed->hdr.status), rr.resolved_upto, {}};
+    if (out.status != wire::status::ok) co_return out; // no body on a non-ok reply
+    auto empties = wire::decode_lsns(parsed->body, rr.empty_count);
+    if (!empties) co_return std::unexpected(net_error::malformed); // truncated verdict list
+    out.empty_slots = std::move(*empties);
+    co_return out;
+}
+
 } // namespace craft::net

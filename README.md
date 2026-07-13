@@ -138,7 +138,7 @@ states, and conflating the last two is divergence (a timed-out write *may* have 
 | `sisl::async::when_quorum` | Fan-out that resumes at the quorum'th ack and leaves the stragglers **detached** -- the marquee data-path win. A generic k-of-n combinator (sibling of `when_all`); lives in sisl. |
 | `read_route_map` | Per-member Missing map: routes each read to an eligible holder, fails over on a miss/down. |
 | `craft_client` | Broadcast, quorum tally, login/redirect. Owns a `dlsn_tracker`; the opaque type behind `client_handle`. |
-| `net/` | The io_uring TCP transport: `craft_conn`, the wire-only `craft_tcp_client`, `CraftTcpReplica` (the `craft_replica` proxy). |
+| `net/` | The TCP transport: `craft_conn`, the wire-only `wire_client`, `CraftTcpReplica` (the `craft_replica` proxy), `craft_async_conn` (the on-ring data path -- every mid-session verb on the caller's io_uring), `craft_session_mgr` (the ONE process-wide admin thread; retires with the last proxy). |
 
 The generic pieces this leans on -- `sisl::result`/`async::result`, `sisl::async::when_quorum`, and the
 `sisl::async::sync_get`/`detach` coroutine bridges -- were hoisted **into sisl**, so nothing here forks them.
@@ -151,7 +151,7 @@ Requires a conan 2.x profile with C++23. sisl / liburing resolve from your remot
 conan install . -of=build --build=missing -s build_type=Debug -s compiler.cppstd=23
 cmake --preset conan-debug
 cmake --build --preset conan-debug
-ctest --preset conan-debug            # 11 suites: wire codec, types, public API (in-process + TCP), mem model, client, transport
+ctest --preset conan-debug            # 13 suites: wire codec, types, public API (in-process + TCP), mem model, client, transport
 ```
 
 Sanitizers: add `-o sanitize=address` (or `thread`) to the `conan install`.
@@ -186,6 +186,12 @@ The three roles map cleanly onto three repos, and **HomeBlocks is only ever the 
 
 - **Ack at quorum, never at the slowest.** A write returns as soon as a majority acks; the straggler keeps
   running detached and still lands the write late (delivered, not lost).
+- **One admin thread per process; no client threads on the data path.** Once a ring is bound
+  (`prepare_for_async`), every mid-session verb -- write, read, keep_alive, resolve -- runs on the caller's
+  io_uring. Blocking admin work (login/logout, which bracket the ring's lifetime) serializes on a single
+  process-wide session-mgr thread shared by every proxy: a 50-disk RAID0 at N=3 idles one thread, not 150,
+  and it retires when the last disk detaches. Connects are always deadline-bounded, so a blackholed replica
+  cannot park that thread.
 - **Term-fenced single writer.** Every IO carries the session `term`; a deposed client's IOs (even keep_alive)
   are rejected `STALE_TERM`, so it cannot keep the session alive.
 - **Client drives commit (piggybacked, no standalone verb).** The client stamps `commit_lsn` on every

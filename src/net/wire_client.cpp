@@ -36,8 +36,9 @@ std::span< uint8_t const > as_bytes(T const& v) {
 }
 } // namespace
 
-std::expected< wire_client, net_error > wire_client::connect(std::string const& host, uint16_t port) {
-    auto c = craft_conn::connect(host, port);
+std::expected< wire_client, net_error > wire_client::connect(std::string const& host, uint16_t port,
+                                                              std::chrono::milliseconds connect_timeout) {
+    auto c = craft_conn::connect(host, port, connect_timeout);
     if (!c) return std::unexpected(c.error());
     wire_client cli;
     cli.conn_ = std::move(*c);

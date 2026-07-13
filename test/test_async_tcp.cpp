@@ -23,6 +23,8 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <thread>
 #include <vector>
 
 #include <liburing.h>
@@ -108,6 +110,25 @@ async_status issue_read(client_handle c, uint64_t addr, uint64_t len, sisl::sg_l
     done->fetch_add(1, std::memory_order_relaxed);
     co_return craft::ok();
 }
+
+// Proxy-direct wrappers for ResolveOverRing: drive one CraftTcpReplica below the client (the test assigns
+// dLSNs by hand to shape the journal). Same no-capturing-lambda rule as above; the proxy outlives the drive.
+async_status issue_proxy_write(CraftTcpReplica* p, client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+                               sisl::sg_list buf, std::shared_ptr< std::atomic< int > > done,
+                               std::shared_ptr< std::atomic< int > > ok) {
+    auto const r = co_await p->write(hdr, dlsn, addr, len, std::move(buf));
+    if (r.has_value()) ok->fetch_add(1, std::memory_order_relaxed);
+    done->fetch_add(1, std::memory_order_relaxed);
+    co_return craft::ok();
+}
+async_status issue_resolution(CraftTcpReplica* p, client_hdr hdr, int64_t upto,
+                              std::shared_ptr< std::optional< result< resolution_result > > > out,
+                              std::shared_ptr< std::atomic< int > > done) {
+    auto r = co_await p->request_resolution(hdr, upto);
+    *out = std::move(r);
+    done->fetch_add(1, std::memory_order_relaxed);
+    co_return craft::ok();
+}
 } // namespace
 
 // N writes then N reads, all in flight over the on-ring TCP transport against a real 3-server cluster. Teardown
@@ -169,4 +190,47 @@ TEST(CraftAsyncTcp, DepthWriteReadRoundTripOverTcp) {
     // Drain any detached straggler legs (a read's keep_alive to the replicas it did not serve) before the ring is
     // exited by ~ring_driver, so no pending socket SQE outlives its coroutine frame.
     driver.drain_for(std::chrono::milliseconds{100});
+}
+
+// RESOLVE rides the data connection once the ring is primed. It fires from the write path's failure branch --
+// the ring thread in async mode -- so the blocking worker hop would stall the reactor; instead it parks a
+// reply slot on the pump like any data op. Drive the leader proxy directly: land dLSN 0 and 2 over the ring,
+// leaving the hole a failed sub-quorum write would leave at 1, then resolve upto=2 and expect the hole
+// verdicted Empty. The negative check is the on-ring proof: a detached resolve leg makes NO progress until the
+// ring is pumped (its send SQE is not even submitted) -- the worker path would complete on its own thread well
+// within the sleep.
+TEST(CraftAsyncTcp, ResolveOverRing) {
+    constexpr uint64_t k_capacity = uint64_t{64} << 20;
+    auto set = craft::make_tcp_replica_set(/*n=*/3, PAGE, k_capacity, wire::k_default_max_tx);
+    auto& leader = *set.replicas[0]; // index 0 is the leader
+
+    auto lr = rg(leader.login(TOKEN)); // blocking, pre-ring: the production ordering (login -> geometry -> ring)
+    ASSERT_TRUE(lr.has_value());
+    uint64_t const term = lr->term;
+
+    ring_driver driver{256};
+    leader.prepare_for_async(&driver.ring);
+
+    auto d0 = page_of(0xA0);
+    auto d2 = page_of(0xA2);
+    auto wdone = std::make_shared< std::atomic< int > >(0);
+    auto wok = std::make_shared< std::atomic< int > >(0);
+    sisl::async::detach(issue_proxy_write(&leader, chdr(term), /*dlsn=*/0, blk(0), PAGE, one_iov(d0), wdone, wok));
+    sisl::async::detach(issue_proxy_write(&leader, chdr(term), /*dlsn=*/2, blk(2), PAGE, one_iov(d2), wdone, wok));
+    ASSERT_TRUE(driver.drive_until([&] { return wdone->load() == 2; })) << "both writes must land over the ring";
+    ASSERT_EQ(wok->load(), 2);
+
+    auto out = std::make_shared< std::optional< result< resolution_result > > >();
+    auto rdone = std::make_shared< std::atomic< int > >(0);
+    sisl::async::detach(issue_resolution(&leader, chdr(term), /*upto=*/2, out, rdone));
+    std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    EXPECT_EQ(rdone->load(), 0) << "resolve must park on the ring, not complete on the worker";
+
+    ASSERT_TRUE(driver.drive_until([&] { return rdone->load() == 1; })) << "resolve must complete once pumped";
+    ASSERT_TRUE(out->has_value() && (*out)->has_value()) << "the leader ran the round";
+    EXPECT_EQ((**out)->resolved_upto, 2) << "everything <= upto is resolved set-wide";
+    ASSERT_EQ((**out)->empty_slots.size(), 1u) << "the hole at dLSN 1 is the round's one Empty verdict";
+    EXPECT_EQ((**out)->empty_slots[0], 1);
+
+    driver.drain_for(std::chrono::milliseconds{25}); // nothing detached should remain; drain before ~ring_driver
 }

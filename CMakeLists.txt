@@ -37,6 +37,7 @@ add_library(craft_client STATIC
   src/net/conn.cpp
   src/net/wire_client.cpp
   src/net/async_conn.cpp # the P2 on-ring TCP data path (recv-demux pump); internal, behind tcp_replica
+  src/net/session_mgr.cpp # the ONE process-wide admin thread every proxy shares (login/logout + the no-ring tier)
   src/net/tcp_replica.cpp
   src/net/tcp_cluster.cpp) # craft/tcp.hpp: the public "connect to remote servers" backend builder
 target_include_directories(craft_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

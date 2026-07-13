@@ -18,9 +18,9 @@
 // drop-in for make_mem_replica_group. The client holds these craft_replica proxies DIRECTLY; there is no
 // volume_handle here, so nothing pulls volume.hpp and a consumer links WITHOUT libhomeblocks.
 //
-// Teardown order is load-bearing: drain each proxy's worker (from the caller's thread, while the proxies are
-// still alive) BEFORE dropping any of them, then stop the server -- see CraftTcpReplica::shutdown and the
-// detached-keep_alive self-join it avoids. The client, which co-owns the proxies, must be destroyed first.
+// Teardown order is load-bearing: drain each proxy's in-flight ops off the shared session-mgr thread (from
+// the caller's thread, while the proxies are still alive) BEFORE dropping any of them, then stop the server --
+// see CraftTcpReplica::shutdown. The client, which co-owns the proxies, must be destroyed first.
 
 #include <chrono>
 #include <cstdint>
@@ -44,7 +44,7 @@ struct TcpReplicaSet {
     TcpReplicaSet& operator=(TcpReplicaSet const&) = delete;
     ~TcpReplicaSet() {
         for (auto& p : replicas)
-            if (p) p->shutdown();   // drain each worker from HERE (main thread) before dropping any proxy
+            if (p) p->shutdown();   // drain each proxy from HERE (main thread) before dropping any of them
         replicas.clear();           // ~CraftTcpReplica closes each connection
         if (server) server->stop(); // serve loops hit EOF -> the acceptor/serve threads join
     }

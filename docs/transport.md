@@ -140,6 +140,13 @@ and per `wire.md` a timed-out op may still apply). What happens to the IO is per
   outstanding on its connection per the rule above.
 - **keep_alive**: dropped; the next drive re-issues it (one outstanding per leg).
 
+The **connect deadline** is likewise a client knob, but unlike the per-request deadline it is never absent:
+an unanswered SYN carries no information a longer wait will improve, so the client always bounds the
+handshake (the per-op deadline when one is set, else a 2s default) rather than ride the kernel's ~2-minute
+SYN-retry window. A refusing peer fails instantly either way; the deadline only bites on a silent drop. This
+matters doubly now that all blocking admin work shares one session-mgr thread: unbounded, a single blackholed
+replica's connect would stall every proxy's admin plane behind it, not one proxy's login.
+
 The protocol owes only one thing here, and already provides it: a timeout is never counted as a rejection.
 
 ## Liveness -- the Keep Alive Timeout

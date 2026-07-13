@@ -72,9 +72,8 @@ std::vector< io_extent > to_io_extents(std::vector< wire::extent_desc > const& e
 
 CraftTcpReplica::CraftTcpReplica(std::string host, uint16_t port, peer_id_t id, std::array< uint8_t, 16 > vol,
                                  std::chrono::milliseconds op_timeout) :
-        host_{std::move(host)}, port_{port}, id_{id}, vol_id_{vol}, op_timeout_{op_timeout} {
-    worker_ = std::thread([this] { worker_loop(); });
-}
+        host_{std::move(host)}, port_{port}, id_{id}, vol_id_{vol}, op_timeout_{op_timeout},
+        mgr_{net::craft_session_mgr::get()} {}
 
 void CraftTcpReplica::shutdown() {
     // WIRE + SERVER time, per op class -- everything craft_client does is ABOVE this proxy and excluded. If the
@@ -102,26 +101,20 @@ void CraftTcpReplica::shutdown() {
         std::lock_guard< std::mutex > g{mu_};
         stop_ = true;
     }
-    cv_.notify_all();
-    // Join only from a non-worker thread. The harness (TcpReplicaHandles) calls this from the main thread,
-    // volumes still alive, before dropping any proxy -- draining in-flight ops while nothing can hit zero refs.
-    if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
+    // Fence the shared session-mgr queue: any hop that saw !stop_ posted (under mu_) before the flip above, so
+    // once the fence runs every previously hopped op has finished its round-trip. On the mgr thread itself the
+    // fence is skipped -- the running job IS the drain point (the old self-join guard, with no thread to join).
+    mgr_->drain();
 }
 
-CraftTcpReplica::~CraftTcpReplica() {
-    shutdown();
-    // Last resort if ~ somehow ran on the worker (must not, under the harness contract): detach so a joinable
-    // std::thread does not std::terminate. The worker holds no dangling reference to us past its current job.
-    if (worker_.joinable()) worker_.detach();
-}
+CraftTcpReplica::~CraftTcpReplica() { shutdown(); }
 
 std::shared_ptr< CraftTcpReplica::hop_event > CraftTcpReplica::hop() {
     auto ev = std::make_shared< hop_event >();
     {
         std::lock_guard< std::mutex > g{mu_};
         if (!stop_) {
-            jobs_.push_back([ev] { ev->complete({}); }); // the worker resumes the coroutine there
-            cv_.notify_one();
+            mgr_->post([ev] { ev->complete({}); }); // the mgr thread resumes the coroutine there
             return ev;
         }
     }
@@ -129,22 +122,13 @@ std::shared_ptr< CraftTcpReplica::hop_event > CraftTcpReplica::hop() {
     return ev;
 }
 
-void CraftTcpReplica::worker_loop() {
-    std::unique_lock< std::mutex > lk{mu_};
-    for (;;) {
-        cv_.wait(lk, [this] { return stop_ || !jobs_.empty(); });
-        if (jobs_.empty()) return; // stop_ with nothing left to drain
-        auto job = std::move(jobs_.front());
-        jobs_.pop_front();
-        lk.unlock();
-        job(); // resumes the coroutine INLINE: it runs its blocking socket op here and completes
-        lk.lock();
-    }
-}
-
 bool CraftTcpReplica::ensure_connected() {
     if (connected_) return true;
-    auto c = net::wire_client::connect(host_, port_);
+    // The handshake deadline: op_timeout_ when set (it bounds a full round-trip, so certainly a SYN), else the
+    // default -- never unbounded, since this runs on the shared session-mgr thread where a blackholed peer
+    // would stall every proxy's admin plane, not just this one's.
+    auto const cto = (op_timeout_ > std::chrono::milliseconds{0}) ? op_timeout_ : net::k_connect_timeout;
+    auto c = net::wire_client::connect(host_, port_, cto);
     if (!c) return false;
     conn_ = std::move(*c); // drops any prior (poisoned) client -> its ring/socket, with a stuck recv, is torn down
     conn_.set_op_timeout(op_timeout_);
@@ -157,8 +141,9 @@ std::error_condition CraftTcpReplica::on_net_fault(net::net_error e) {
     // connection cannot serve the next op. Poison it (drop connected_/bound_) so the next op reconnects and
     // re-HELOs. Only invalid_argument (a caller precondition, e.g. a short read dest) leaves the socket intact.
     //
-    // Resetting the WHOLE connection on a per-op timeout is a SHIM artifact, not target semantics. This proxy
-    // is strictly serial (one worker, one op in flight), so a timeout can only strand that single op's reply --
+    // Resetting the WHOLE connection on a per-op timeout is a SHIM artifact, not target semantics. This proxy's
+    // blocking ops are strictly serial (one op in flight, on the session-mgr thread), so a timeout can only
+    // strand that single op's reply --
     // there are no other in-flight ops on this socket to lose -- and the still-pending recv SQE poisons the
     // one-op ring, so the socket has to go. The async transport that replaces this pipelines many ops keyed by
     // request_id: there a deadline abandons only that op's landing pad (cancel its SQE, drop a late reply by
@@ -192,7 +177,7 @@ std::optional< std::error_condition > CraftTcpReplica::ensure_bound(uint64_t ter
 
 async_result< LoginResult > CraftTcpReplica::login(uint64_t client_token) {
     auto ev = hop();
-    co_await *ev; // now on the worker thread
+    co_await *ev; // now on the session-mgr thread
     if (!ensure_connected()) co_return fail(craft_error::REPLICA_DOWN);
     auto r = conn_.login(vol_id_, client_token); // LOGIN names the volume, exactly as HELO does
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
@@ -341,7 +326,21 @@ async_result< lsn_pair > CraftTcpReplica::keep_alive(client_hdr hdr) {
 }
 
 async_result< resolution_result > CraftTcpReplica::request_resolution(client_hdr hdr, int64_t upto) {
-    // Rare, admin-shaped op: always the blocking worker path (like login/logout), never the ring.
+    if (ring_) { // ── on-ring: this fires from the write path's failure branch, i.e. FROM the ring thread in async
+                 // mode, so it must not hop to a blocking round-trip. A round is slow leader work, but the pump
+                 // demuxes replies by request_id, so the parked leg costs the data ops in flight nothing.
+        if (!aconn_)
+            aconn_ =
+                std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
+        if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+            co_return std::unexpected(net_to_error(e.error()));
+        auto r = co_await aconn_->resolve(upto, hdr.commit_lsn, hdr.all_committed_lsn);
+        if (!r) co_return std::unexpected(net_to_error(r.error()));
+        if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
+        co_return resolution_result{r->resolved_upto, std::move(r->empty_slots)};
+    }
+
+    // No-ring tier: the blocking session-mgr path, like login/logout.
     auto ev = hop();
     co_await *ev;
     if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);

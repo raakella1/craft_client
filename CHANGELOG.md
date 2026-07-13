@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.1
+
+### Added
+- `craft_async_conn::resolve`: the client-requested resolution round rides the on-ring data connection once
+  `prepare_for_async` primes the ring (it fires from the write path's failure branch -- the ring thread -- so
+  the blocking hop would stall the reactor). Replies demux by `request_id` like every data op, so the slow
+  leader round costs the in-flight IOs nothing. The blocking path remains only for the no-ring tier.
+- `craft_session_mgr`: ONE process-wide admin thread shared by every `CraftTcpReplica`, replacing the
+  per-proxy worker (a 50-disk RAID0 at N=3 would otherwise idle 150 threads). Refcounted, not a leaky
+  singleton: the thread retires when the last proxy in the process drops, and a later attach mints a fresh
+  one. Proxy `shutdown()` drains via a FIFO fence instead of a join; the detached-leg self-destruction edge
+  (the old UB-adjacent detach backstop) is now memory-safe -- the thread co-owns its queue state.
+- Connect deadline: `craft_conn::connect` is ALWAYS bounded (non-blocking connect + poll; default
+  `k_connect_timeout` 2s, or the proxy's `op_timeout` when set). A peer silently dropping SYNs fails at the
+  deadline instead of parking the shared session-mgr thread for the kernel's ~2min retry window -- which
+  would stall every disk's admin plane, not one proxy's.
+
+### Changed
+- On the no-ring tier every proxy's blocking legs serialize FIFO on the shared session-mgr thread, so
+  ack-at-quorum degrades to FIFO completion order there -- acceptable for the shim/test tier, irrelevant
+  on-ring where write/read/keep_alive/resolve all fan out on the caller's io_uring.
+
 ## 0.1.x
 - Initial commit
 

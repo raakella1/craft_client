@@ -16,8 +16,8 @@
 // tcp_cluster: the io_uring TCP transport behind an opaque handle. The concrete class lives ENTIRELY here (never
 // installed) -- the public surface is craft/tcp.hpp's free functions over tcp_cluster_handle. It builds one
 // CraftTcpReplica proxy per endpoint and keeps that proxy type (and every src/net header) off the surface.
-// Teardown drains each worker from the destroying thread before any proxy drops (see tcp_set.hpp for the same
-// rule the reference server-side set uses).
+// Teardown drains each proxy's in-flight ops off the shared session-mgr thread before any proxy drops (see
+// tcp_set.hpp for the same rule the reference server-side set uses).
 
 #include <cstring>
 #include <string>
@@ -35,7 +35,7 @@ public:
             proxies_{std::move(proxies)}, backends_{std::move(backends)} {}
     ~tcp_cluster() {
         for (auto& p : proxies_)
-            if (p) p->shutdown(); // drain each worker from HERE (the destroying thread) before any proxy drops
+            if (p) p->shutdown(); // drain each proxy from HERE (the destroying thread) before any of them drops
     }
 
     std::vector< std::shared_ptr< craft_replica > > const& backends() const { return backends_; }

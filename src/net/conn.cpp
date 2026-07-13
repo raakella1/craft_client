@@ -16,8 +16,10 @@
 #include <craft/net/conn.hpp>
 
 #include <arpa/inet.h>
+#include <fcntl.h> // O_NONBLOCK (the bounded connect)
 #include <netinet/in.h>
 #include <netinet/tcp.h> // TCP_NODELAY
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -93,7 +95,8 @@ std::expected< craft_conn, net_error > craft_conn::adopt(int fd) {
     return c;
 }
 
-std::expected< craft_conn, net_error > craft_conn::connect(std::string const& host, uint16_t port) {
+std::expected< craft_conn, net_error > craft_conn::connect(std::string const& host, uint16_t port,
+                                                            std::chrono::milliseconds timeout) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return std::unexpected(net_error::setup);
 
@@ -105,10 +108,44 @@ std::expected< craft_conn, net_error > craft_conn::connect(std::string const& ho
         return std::unexpected(net_error::setup);
     }
     set_nodelay(fd);
-    if (::connect(fd, reinterpret_cast< sockaddr* >(&addr), sizeof(addr)) < 0) {
+
+    // Non-blocking connect + poll: bound the handshake by `timeout` instead of the kernel's SYN-retry window.
+    // A refusing peer still fails on the first POLLOUT (SO_ERROR below says why); only a peer silently
+    // dropping SYNs runs the clock out.
+    int const flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
         ::close(fd);
-        return std::unexpected(net_error::connect);
+        return std::unexpected(net_error::setup);
     }
+    if (::connect(fd, reinterpret_cast< sockaddr* >(&addr), sizeof(addr)) < 0) {
+        if (errno != EINPROGRESS) {
+            ::close(fd);
+            return std::unexpected(net_error::connect);
+        }
+        auto const deadline = std::chrono::steady_clock::now() + timeout;
+        for (;;) {
+            auto const rem =
+                std::chrono::duration_cast< std::chrono::milliseconds >(deadline - std::chrono::steady_clock::now());
+            if (rem <= std::chrono::milliseconds{0}) {
+                ::close(fd);
+                return std::unexpected(net_error::connect); // deadline: the peer is silently dropping SYNs
+            }
+            pollfd pfd{fd, POLLOUT, 0};
+            int const pr = ::poll(&pfd, 1, static_cast< int >(rem.count()));
+            if (pr > 0) break; // writable OR failed -- SO_ERROR below tells which
+            if (pr == 0 || errno != EINTR) {
+                ::close(fd);
+                return std::unexpected(net_error::connect);
+            } // EINTR: re-poll with the remaining budget
+        }
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+            ::close(fd);
+            return std::unexpected(net_error::connect);
+        }
+    }
+    (void)::fcntl(fd, F_SETFL, flags); // back to blocking: send/recv run on this conn's own ring
     return adopt(fd);
 }
 

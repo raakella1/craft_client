@@ -99,8 +99,9 @@ public:
     // completion. Called once per ring, OFF the IO path (never concurrently with an in-flight op). Default
     // no-op: transports that don't submit on a caller-provided ring (the worker-thread TCP client, the
     // in-process reference over its own pool) ignore it and keep their existing completion source. After this,
-    // write/read/keep_alive submit their SQEs on `ring` and complete via sisl::async::cqe_state, which the ring
-    // owner's reap loop dispatches -- so many ops go in flight at once (QD>1) on the caller's thread.
+    // every mid-session verb (write/read/keep_alive/request_resolution) submits its SQEs on `ring` and completes
+    // via sisl::async::cqe_state, which the ring owner's reap loop dispatches -- so many ops go in flight at
+    // once (QD>1) on the caller's thread.
     virtual void prepare_for_async(::io_uring* /*ring*/) noexcept {}
 
     // This replica's endpoint id (for routing / membership).

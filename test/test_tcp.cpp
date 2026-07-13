@@ -20,6 +20,7 @@
 // wire::extent_desc, and a fenced op is a VALID reply carrying STALE_TERM, not an error.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <span>
 #include <thread>
@@ -280,4 +281,16 @@ TEST(CraftTcp, PostLogoutWriteFenced) {
         ASSERT_TRUE(w.has_value());
         EXPECT_EQ(w->status, wire::status::stale_term);
     });
+}
+
+// The connect deadline: a peer that silently drops SYNs must fail the connect at the deadline, not after the
+// kernel's ~2min retry window -- on the shared session-mgr thread that hang would stall every proxy's admin
+// plane. 192.0.2.1 (TEST-NET-1) is reserved-unroutable, so the SYN typically goes unanswered; an environment
+// that instead rejects the route errors even faster. Either way connect must return well inside the bound.
+TEST(CraftTcp, ConnectDeadlineBoundsABlackholedPeer) {
+    auto const t0 = std::chrono::steady_clock::now();
+    auto c = wire_client::connect("192.0.2.1", 6666, std::chrono::milliseconds{250});
+    auto const elapsed = std::chrono::steady_clock::now() - t0;
+    EXPECT_FALSE(c.has_value());
+    EXPECT_LT(elapsed, std::chrono::seconds{5}) << "connect must fail at the deadline, not the SYN-retry window";
 }

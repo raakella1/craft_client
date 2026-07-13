@@ -25,8 +25,9 @@
 // Raw fd, NOT IOSQE_FIXED_FILE: nothing is registered with the ring, so a socket is opened lazily, dropped on a
 // fault, and reconnected at will -- reconnect is just the lazy path again. Management (connect + HELO) is off the
 // caller's admin path: login already ran (blocking) at factory time to yield lba/capacity/term BEFORE the disk
-// existed, so this only owns the DATA path (write/read/keep_alive), HELO'ing the data fd with the session term
-// the op carries. The wire codec (frame_message / parse_message) is shared verbatim with the blocking client.
+// existed, so this owns everything MID-SESSION (write/read/keep_alive/resolve), HELO'ing the data fd with the
+// session term the op carries. The wire codec (frame_message / parse_message) is shared verbatim with the
+// blocking client.
 
 #include <array>
 #include <coroutine>
@@ -75,6 +76,11 @@ public:
                                                                      int64_t all_committed_lsn);
     sisl::async::task< std::expected< lsn_reply, net_error > > keep_alive(int64_t commit_lsn,
                                                                           int64_t all_committed_lsn);
+    // The client-requested resolution round, on the data connection like every mid-session verb. The round is
+    // slow leader work (fetch-from-holder), but replies demux by request_id, so the parked leg costs the data
+    // ops in flight nothing.
+    sisl::async::task< std::expected< resolve_reply, net_error > > resolve(int64_t upto, int64_t commit_lsn,
+                                                                           int64_t all_committed_lsn);
 
     bool ready() const noexcept { return ready_; }
 

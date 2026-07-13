@@ -44,6 +44,12 @@ enum class net_error {
     timed_out,        // no reply within the op deadline; the connection is left needing a reset
 };
 
+// The default connect deadline. connect() is ALWAYS bounded: a refusing peer errors instantly (RST), so a
+// deadline only bites on a peer silently dropping SYNs -- and no SYN-ACK in seconds means dead, not slow.
+// The alternative is the kernel's SYN-retry window (~2 minutes), which would park the shared session-mgr
+// thread and stall every proxy's admin plane behind the one blackholed peer.
+constexpr std::chrono::milliseconds k_connect_timeout{2000};
+
 // One connection. Movable, non-copyable; owns the socket fd and its io_uring.
 class craft_conn {
 public:
@@ -54,8 +60,11 @@ public:
     craft_conn(craft_conn const&) = delete;
     craft_conn& operator=(craft_conn const&) = delete;
 
-    // Connect to host:port (blocking connect) and set up the ring.
-    static std::expected< craft_conn, net_error > connect(std::string const& host, uint16_t port);
+    // Connect to host:port and set up the ring. The handshake is bounded by `timeout` (see k_connect_timeout);
+    // past it the fd is dropped and connect errors. Non-blocking connect + poll under the hood; the fd reverts
+    // to blocking for send/recv.
+    static std::expected< craft_conn, net_error > connect(std::string const& host, uint16_t port,
+                                                          std::chrono::milliseconds timeout = k_connect_timeout);
     // Wrap an already-connected/accepted fd and set up a ring (server side).
     static std::expected< craft_conn, net_error > adopt(int fd);
 
