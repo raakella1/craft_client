@@ -93,7 +93,11 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
     auto const lsns = replica_->srv_lsns();
     wire::login_rsp rsp{};
     rsp.term = session_term_;
-    rsp.dlsn = lsns.last_append_lsn + 1; // the next dLSN for new IO
+    // The login WATERMARK: the last dLSN already durable (-1 on a fresh replica), NOT the next one to use -- the
+    // client derives next_dlsn_ = dlsn + 1 itself. This used to send last_append_lsn + 1, which skipped slot 0 on
+    // a fresh cluster: every replica was then permanently Missing dLSN 0, apply_up_to() stalled there forever, and
+    // commit_lsn pinned at -1 -- so no journal reclaimed and every read walked the whole tail. See wire.hpp.
+    rsp.dlsn = lsns.last_append_lsn;
     rsp.capacity = geo_.capacity;
     rsp.lba_size = geo_.lba_size;
     rsp.max_tx = geo_.max_tx;

@@ -118,6 +118,14 @@ struct login_req {
 };
 struct login_rsp {
     uint64_t term;
+    // THE LOGIN WATERMARK: the LAST dLSN already durable -- NOT the next one to use. On a fresh replica this is
+    // -1. The client reads it as a watermark (dlsn_tracker::reset_at: frontier_ = dlsn, next_dlsn_ = dlsn + 1;
+    // read_route_map::reset: everything <= dlsn is universally held), so a server that sends last_append_lsn + 1
+    // here makes the client (a) start writing one slot too high, leaving that slot permanently Missing on EVERY
+    // replica, and (b) believe that slot is already durable. Each replica's apply_up_to() then stalls on the hole
+    // FOREVER -- nothing fills a Missing slot until resync exists (the peer plane) -- so commit_lsn pins at -1,
+    // no journal ever reclaims, and every read degrades to a backward walk of the whole journal tail. It is not a
+    // correctness bug (reads still serve off the tail overlay), which is exactly why it hides. Send last_append_lsn.
     int64_t dlsn;
     uint64_t capacity;
     uint32_t lba_size;

@@ -85,6 +85,52 @@ void with_session(F&& body) {
 
 } // namespace
 
+// The commit frontier MUST advance as writes land. This is the behavioral guard for the login-watermark
+// off-by-one: if LOGIN hands back "the next dLSN" instead of "the last durable dLSN", the client starts at slot 1,
+// slot 0 is never written, and the replica's apply_up_to() stalls on that hole FOREVER -- commit_lsn pins at -1.
+// Nothing else fails (reads still serve off the journal-tail overlay), so only a frontier check catches it. The
+// symptom in production was a read walking the entire unapplied journal tail: 0.2us -> 350us per read.
+TEST(CraftTcp, CommitFrontierAdvances) {
+    auto lst = craft_listener::bind_listen(0);
+    ASSERT_TRUE(lst.has_value());
+    uint16_t const port = lst->port();
+
+    craft_tcp_server server{make_geo()};
+    std::jthread srv([&] {
+        auto conn = lst->accept();
+        if (conn) server.serve(std::move(*conn));
+    });
+
+    {
+        auto cli = wire_client::connect("127.0.0.1", port);
+        ASSERT_TRUE(cli.has_value());
+        auto lr = cli->login(/*volume_id=*/{}, 0xABCD);
+        ASSERT_TRUE(lr.has_value());
+        ASSERT_EQ(lr->dlsn, -1) << "fresh replica: the last durable dLSN is -1, so new IO starts at 0";
+
+        // Drive dLSNs from lr->dlsn + 1, exactly as dlsn_tracker::reset_at does.
+        constexpr int N = 8;
+        std::vector< uint8_t > page(k_lba, 0x5A);
+        int64_t const first = lr->dlsn + 1;
+        for (int i = 0; i < N; ++i) {
+            int64_t const d = first + i;
+            auto w = cli->write(d, static_cast< uint64_t >(d) * k_lba, k_lba, page, /*commit_lsn=*/d - 1,
+                                /*all_committed=*/d - 1);
+            ASSERT_TRUE(w.has_value());
+            ASSERT_EQ(w->status, wire::status::ok);
+            // The piggybacked commit: the replica applied everything <= the commit_lsn we stamped. If slot 0 were
+            // Missing this would be pinned at -1 for every single write.
+            EXPECT_EQ(w->commit_lsn, d - 1) << "commit frontier stalled at write dLSN " << d;
+            EXPECT_EQ(w->last_append_lsn, d);
+        }
+        // One more round-trip carrying the final commit: the frontier must reach the last write.
+        auto ka = cli->keep_alive(/*commit_lsn=*/first + N - 1, /*all_committed=*/first + N - 1);
+        ASSERT_TRUE(ka.has_value());
+        EXPECT_EQ(ka->commit_lsn, first + N - 1) << "frontier did not reach the last written dLSN";
+        cli->logout();
+    }
+}
+
 // login returns the geometry the server advertises; logout tears the session down; a second logout is fenced.
 TEST(CraftTcp, LoginLogoutRoundTrip) {
     auto lst = craft_listener::bind_listen(0);
@@ -107,7 +153,13 @@ TEST(CraftTcp, LoginLogoutRoundTrip) {
         EXPECT_EQ(lr->capacity, uint64_t{1} << 30);
         EXPECT_EQ(lr->lba_size, k_lba);
         EXPECT_EQ(lr->max_tx, 512u * 1024);
-        EXPECT_EQ(lr->dlsn, 0); // fresh replica -> the first dLSN for new IO is 0
+        // The login WATERMARK: the LAST dLSN already durable, which on a fresh replica is -1. NOT the next dLSN
+        // to use -- the client derives that itself (next_dlsn_ = dlsn + 1). This assertion used to read `0` (and
+        // the server used to send last_append_lsn + 1 to match), which meant the client started at dLSN 1 and
+        // slot 0 was never written: every replica sat permanently Missing dLSN 0, apply_up_to() stalled there,
+        // and commit_lsn pinned at -1 forever. Reads still served correct bytes off the journal-tail overlay, so
+        // nothing failed -- it only showed up as a read walking the entire journal tail. Hence the guard below.
+        EXPECT_EQ(lr->dlsn, -1);
         ASSERT_EQ(lr->members.size(), 1u);
         EXPECT_EQ(lr->members[0].addr, "127.0.0.1:0");
         EXPECT_EQ(lr->members[0].id[0], 0x01);
