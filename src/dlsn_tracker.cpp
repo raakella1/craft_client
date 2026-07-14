@@ -135,8 +135,8 @@ void dlsn_tracker::advance_frontier() {
 
 void dlsn_tracker::note_resolution_want(int64_t upto) {
     int64_t w = resolve_want_.load(std::memory_order_relaxed);
-    while (upto > w && !resolve_want_.compare_exchange_weak(w, upto, std::memory_order_release,
-                                                            std::memory_order_relaxed)) {}
+    while (upto > w &&
+           !resolve_want_.compare_exchange_weak(w, upto, std::memory_order_release, std::memory_order_relaxed)) {}
 }
 
 std::optional< int64_t > dlsn_tracker::resolution_want() const {

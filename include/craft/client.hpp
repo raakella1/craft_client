@@ -24,7 +24,9 @@
 #include <memory>
 #include <vector>
 
-#include <sisl/fds/buffer.hpp> // sisl::sg_list
+#include <sisl/async/light_task.hpp> // sisl::async::light_result / ::light_status (the co_await-able result carrier)
+#include <sisl/fds/buffer.hpp>       // sisl::sg_list
+#include <sisl/result.hpp>           // sisl::result / ::status / ::ok
 
 #include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases
 
@@ -42,6 +44,18 @@ struct tracker_stats; // returned by dlsn_stats(); a driver never calls it (its 
 // internal -- it is the CLIENT's view of a member, implemented by a transport proxy or the reference model, and a
 // storage backend neither implements it nor appears on this side of the wire.
 class craft_replica;
+
+// The FREESTANDING task (sisl::async::light_task): a plain awaitable co_await-able from any coroutine --
+// another light_task, a ublk driver's disk_task, an exec::task -- with no scheduler anywhere. THE THREADING
+// CONTRACT IS THE COMPLETION'S: the awaiting coroutine resumes on whatever thread completes the op -- the
+// ring owner's reap thread once prepare_for_async has bound a ring, else a transport-internal thread (the
+// reference model's replica pool, the TCP proxy's session-mgr thread). A coroutine-native consumer must
+// bind a ring or tolerate foreign-thread resumption; a blocking consumer (sisl::async::sync_get) is safe
+// either way. (The previous exec::task currency could hop an async consumer back to its own scheduler;
+// nothing in this stack used that, and the on-ring data path is built on NOT doing it.)
+template < typename T >
+using async_result = sisl::async::light_result< T >;
+using async_status = sisl::async::light_status;
 
 // ── construction: the ONE seam ──
 //

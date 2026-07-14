@@ -43,6 +43,10 @@
 
 using namespace craft;
 using namespace craft::test;
+using sisl::ok;
+template < typename T >
+using result = sisl::result< T >;
+using status = sisl::status;
 
 namespace {
 constexpr uint64_t TOKEN = 0xC0FFEEULL;
@@ -101,14 +105,14 @@ async_status issue_write(client_handle c, uint64_t addr, uint64_t len, sisl::sg_
     auto const r = co_await craft::write(c, addr, len, buf);
     if (r.has_value()) ok->fetch_add(1, std::memory_order_relaxed);
     done->fetch_add(1, std::memory_order_relaxed);
-    co_return craft::ok();
+    co_return sisl::ok();
 }
 async_status issue_read(client_handle c, uint64_t addr, uint64_t len, sisl::sg_list dest,
                         std::shared_ptr< std::atomic< int > > done, std::shared_ptr< std::atomic< int > > ok) {
     auto const r = co_await craft::read(c, addr, len, dest);
     if (r.has_value()) ok->fetch_add(1, std::memory_order_relaxed);
     done->fetch_add(1, std::memory_order_relaxed);
-    co_return craft::ok();
+    co_return sisl::ok();
 }
 
 // Proxy-direct wrappers for ResolveOverRing: drive one CraftTcpReplica below the client (the test assigns
@@ -119,7 +123,7 @@ async_status issue_proxy_write(CraftTcpReplica* p, client_hdr hdr, int64_t dlsn,
     auto const r = co_await p->write(hdr, dlsn, addr, len, std::move(buf));
     if (r.has_value()) ok->fetch_add(1, std::memory_order_relaxed);
     done->fetch_add(1, std::memory_order_relaxed);
-    co_return craft::ok();
+    co_return sisl::ok();
 }
 async_status issue_resolution(CraftTcpReplica* p, client_hdr hdr, int64_t upto,
                               std::shared_ptr< std::optional< result< resolution_result > > > out,
@@ -127,7 +131,7 @@ async_status issue_resolution(CraftTcpReplica* p, client_hdr hdr, int64_t upto,
     auto r = co_await p->request_resolution(hdr, upto);
     *out = std::move(r);
     done->fetch_add(1, std::memory_order_relaxed);
-    co_return craft::ok();
+    co_return sisl::ok();
 }
 } // namespace
 

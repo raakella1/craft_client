@@ -26,6 +26,10 @@
 
 namespace craft {
 
+using sisl::ok;
+template < typename T >
+using result = sisl::result< T >;
+
 // How far the router's overlay may lag the frontier before a write trims it. Mirrors dlsn_tracker's
 // k_trunc_batch: both structures are per-dLSN StreamTrackers, so both must be trimmed by whatever advances the
 // frontier -- which is the WRITE path. read() still folds exactly (fold_to(F), unbatched), so a read never sees

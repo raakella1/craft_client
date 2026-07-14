@@ -18,7 +18,8 @@
 
 #include <gtest/gtest.h>
 
-#include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases (all this suite needs)
+#include <craft/client.hpp> // result types
+#include <craft/types.hpp>  // the CRAFT vocabulary
 
 // The client-facing async aliases are exactly sisl's canonical FREESTANDING result carrier (no fork, and no
 // stdexec: light_task resumes its awaiter inline on the completing thread).

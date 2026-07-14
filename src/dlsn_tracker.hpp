@@ -36,7 +36,8 @@
 #include <sisl/async/shared_awaitable.hpp>
 #include <sisl/fds/stream_tracker.hpp>
 
-#include <craft/types.hpp> // async_result / result / craft_error / ok()
+#include <craft/client.hpp> // result types
+#include <craft/types.hpp>
 
 namespace craft {
 

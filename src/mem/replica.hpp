@@ -35,12 +35,18 @@
 #include <string>
 #include <vector>
 
+#include <craft/client.hpp>  // result types
 #include "craft_peer.hpp"    // the PEER plane: craft_peer + JournalSlot + lba_t (this model is its only implementer)
 #include "craft_replica.hpp" // the CLIENT plane: the craft_replica interface
 
 namespace craft {
 
 class MemTransport; // in-process network + cold path
+
+using sisl::ok;
+template < typename T >
+using result = sisl::result< T >;
+using status = sisl::status;
 
 // Per-partition CRAFT state, internal to a replica implementation. Authoritative in memory; a production replica
 // recovers it from the journal + superblock on restart (this model does not). Not on either plane's interface --

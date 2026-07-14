@@ -96,7 +96,7 @@ std::expected< craft_conn, net_error > craft_conn::adopt(int fd) {
 }
 
 std::expected< craft_conn, net_error > craft_conn::connect(std::string const& host, uint16_t port,
-                                                            std::chrono::milliseconds timeout) {
+                                                           std::chrono::milliseconds timeout) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return std::unexpected(net_error::setup);
 

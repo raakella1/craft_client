@@ -84,8 +84,8 @@ public:
 
     // `connect_timeout` bounds the TCP handshake only (see craft_conn::connect); reply waits are bounded
     // separately by set_op_timeout.
-    static std::expected< wire_client, net_error > connect(std::string const& host, uint16_t port,
-                                                           std::chrono::milliseconds connect_timeout = k_connect_timeout);
+    static std::expected< wire_client, net_error >
+    connect(std::string const& host, uint16_t port, std::chrono::milliseconds connect_timeout = k_connect_timeout);
 
     // ── session ──
     // LOGIN names the volume (the design's login(client_token, vol_id)): a multi-volume server routes the

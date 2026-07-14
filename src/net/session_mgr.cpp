@@ -18,8 +18,8 @@
 namespace craft::net {
 
 namespace {
-std::mutex g_mu;                             // guards g_mgr against concurrent first-takers
-std::weak_ptr< craft_session_mgr > g_mgr;    // the process-wide instance, alive while any proxy holds it
+std::mutex g_mu;                          // guards g_mgr against concurrent first-takers
+std::weak_ptr< craft_session_mgr > g_mgr; // the process-wide instance, alive while any proxy holds it
 } // namespace
 
 std::shared_ptr< craft_session_mgr > craft_session_mgr::get() {
@@ -55,8 +55,10 @@ craft_session_mgr::~craft_session_mgr() {
     // The last ref can drop ON the mgr thread (a detached leg held the last volume_handle, and dropping the
     // proxy dropped us); a thread cannot join itself, so detach -- it drains what remains on its own shared
     // copy of the state and exits.
-    if (on_mgr_thread()) thr_.detach();
-    else thr_.join();
+    if (on_mgr_thread())
+        thr_.detach();
+    else
+        thr_.join();
 }
 
 void craft_session_mgr::post(std::function< void() > job) {

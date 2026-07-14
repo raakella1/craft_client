@@ -42,7 +42,7 @@
 
 #include <sisl/async/shared_awaitable.hpp>
 
-#include "craft_replica.hpp" // the craft_replica interface + async_result/async_status + domain types
+#include "craft_replica.hpp"   // the craft_replica interface + async_result/async_status + domain types
 #include "net/session_mgr.hpp" // the process-wide admin thread every proxy shares
 #include "net/wire_client.hpp"
 

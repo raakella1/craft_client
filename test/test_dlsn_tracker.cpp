@@ -30,9 +30,10 @@
 #include <dlsn_tracker.hpp>
 
 using namespace craft;
-using namespace craft;
 
 namespace {
+template < typename T >
+using result = sisl::result< T >;
 constexpr uint32_t BS = 512; // block size
 
 constexpr uint64_t blk(uint64_t n) { return n * uint64_t{BS}; }

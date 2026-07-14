@@ -72,7 +72,11 @@ std::vector< io_extent > to_io_extents(std::vector< wire::extent_desc > const& e
 
 CraftTcpReplica::CraftTcpReplica(std::string host, uint16_t port, peer_id_t id, std::array< uint8_t, 16 > vol,
                                  std::chrono::milliseconds op_timeout) :
-        host_{std::move(host)}, port_{port}, id_{id}, vol_id_{vol}, op_timeout_{op_timeout},
+        host_{std::move(host)},
+        port_{port},
+        id_{id},
+        vol_id_{vol},
+        op_timeout_{op_timeout},
         mgr_{net::craft_session_mgr::get()} {}
 
 void CraftTcpReplica::shutdown() {
@@ -213,7 +217,7 @@ async_status CraftTcpReplica::logout(client_hdr hdr) {
     auto r = conn_.logout();
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
     if (*r != wire::status::ok) co_return std::unexpected(status_to_error(*r));
-    co_return ok();
+    co_return sisl::ok();
 }
 
 async_result< lsn_pair > CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
