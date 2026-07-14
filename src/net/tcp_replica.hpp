@@ -22,15 +22,18 @@
 // CONCURRENCY BRIDGE. wire_client is blocking, so each blocking-path op hops onto the process-wide CRAFT
 // session-mgr thread (net::craft_session_mgr, via a shared_awaitable exactly as MemTransport::after does),
 // runs the socket round-trip there, and resumes the awaiting coroutine on completion. ONE admin thread for
-// every proxy in the process -- a 50-disk RAID0 at N=3 idles one thread, not 150. Once the ring is primed
-// that thread's whole job is login/logout (they bracket the ring's lifetime); on the no-ring tier every leg
-// of every proxy serializes on it, so ack-at-quorum degrades to FIFO completion order -- fine for the
-// shim/test tier, irrelevant on-ring where the mid-session verbs fan out on the caller's io_uring.
+// every proxy in the process -- a 50-disk RAID0 at N=3 idles one thread, not 150. Once rings are in play that
+// thread's whole job is login/logout (they bracket every ring's lifetime); on the null-q tier every leg of
+// every proxy serializes on it, so ack-at-quorum degrades to FIFO completion order -- fine for the shim/test
+// tier, irrelevant on-ring where the mid-session verbs fan out on the caller's io_uring. Each caller ring (a
+// blk-mq hw queue) gets its OWN data connection per proxy -- the nr_hw_queues x N grid -- selected by the
+// verb's leading `q`; see the queue_slot table below.
 //
 // Homeblocks-coupled by construction (it implements craft_replica); it is the one client-side coupled adapter,
 // the mirror of craft_tcp_server on the far end.
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -38,6 +41,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include <sisl/async/shared_awaitable.hpp>
@@ -74,26 +78,23 @@ public:
     void shutdown();
 
     // ── craft_replica: client-facing ──
+    // Each mid-session verb's leading `q` selects the ON-RING data path (one craft_async_conn per caller ring,
+    // opened lazily on it at that ring's first op and reconnected at will) or, null, the blocking session-mgr
+    // hop -- where the awaiter RESUMES ON THE MGR THREAD (freestanding tasks resume inline at completion).
+    // login/logout are always blocking: they bracket every ring's lifetime (login ran before any ring existed,
+    // to yield lba/capacity/term).
     async_result< LoginResult > login(uint64_t client_token) override;
     async_status logout(client_hdr hdr) override;
-    async_result< lsn_pair > write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+    async_result< lsn_pair > write(::io_uring* q, client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
                                    sisl::sg_list data) override;
-    async_result< read_result > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+    async_result< read_result > read(::io_uring* q, client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
                                      sisl::sg_list dest) override;
-    async_result< lsn_pair > keep_alive(client_hdr hdr) override;
-    // The client-requested resolution round. It fires MID-SESSION, from the write path's failure branch -- the
-    // ring thread in async mode -- so once the ring is primed it rides the data connection like keep_alive
-    // (replies demux by request_id; the server handles a connection's ops concurrently, so the slow round
-    // blocks nothing). Unprimed, it takes the blocking session-mgr path like login/logout.
-    async_result< resolution_result > request_resolution(client_hdr hdr, int64_t upto) override;
-
-    // Prime the ON-RING data path: store the caller's ring. Just a pointer -- raw fds, no IOSQE_FIXED_FILE, so the
-    // data connection (craft_async_conn) is opened lazily on it at the first mid-session op and reconnected at
-    // will. login/logout stay on the blocking session-mgr path (they bracket the ring's lifetime: login ran before any
-    // ring existed, to yield lba/capacity/term); everything mid-session (write/read/keep_alive/resolve) moves
-    // onto the ring. Unprimed, a mid-session verb hops to the session-mgr thread and its awaiter RESUMES THERE
-    // (freestanding tasks resume inline at completion) -- see craft_replica::prepare_for_async for the contract.
-    void prepare_for_async(::io_uring* ring) noexcept override { ring_ = ring; }
+    async_result< lsn_pair > keep_alive(::io_uring* q, client_hdr hdr) override;
+    // The client-requested resolution round. It fires MID-SESSION, from the write path's failure branch -- a
+    // queue thread in async mode -- so on-ring it rides that queue's data connection like keep_alive (replies
+    // demux by request_id; the server handles a connection's ops concurrently, so the slow round blocks
+    // nothing). With a null q it takes the blocking session-mgr path like login/logout.
+    async_result< resolution_result > request_resolution(::io_uring* q, client_hdr hdr, int64_t upto) override;
 
     peer_id_t id() const override { return id_; }
 
@@ -142,11 +143,29 @@ private:
 
     net::wire_client conn_; // touched ONLY on the session-mgr thread (login/logout: the blocking admin path)
 
-    // The ON-RING data path (prepare_for_async): the caller's ring + a lazily-opened async connection over it.
-    // Null ring_ => not primed => write/read/keep_alive take the blocking conn_ path above. Opened/torn down on
-    // the caller's (queue) thread, so no lock; its dtor is defined in the .cpp where craft_async_conn is complete.
-    ::io_uring* ring_{nullptr};
-    std::unique_ptr< net::craft_async_conn > aconn_;
+    // The ON-RING data path: one lazily-opened async connection PER CALLER RING (a blk-mq hw queue) -- this
+    // proxy's column of the nr_hw_queues x N connection grid. A verb's leading `q` selects its slot; a null q
+    // (or a full table) takes the blocking conn_ path above. Slots are APPEND-ONLY: the steady-state scan reads
+    // n_slots_ (acquire) and compares ring pointers -- no lock on the per-IO path; slots_mu_ serializes only the
+    // append (a ring's FIRST verb). That first verb runs on the ring owner's thread (the affinity contract:
+    // a ring is passed only from the thread that owns it), so the conn is BORN on its one thread and
+    // craft_async_conn keeps its single-thread design -- do not add locks there; add slots here. Slot dtors run
+    // in ~CraftTcpReplica (defined in the .cpp where craft_async_conn is complete), after every ring has been
+    // quiesced and exited -- the plural form of the old single-ring teardown contract.
+    struct queue_slot {
+        ::io_uring* ring{nullptr};
+        std::unique_ptr< net::craft_async_conn > conn;
+#ifndef NDEBUG
+        std::thread::id owner{}; // the ring's one submitting thread; conn_for asserts every reuse matches
+#endif
+    };
+    static constexpr std::size_t k_max_queues = 64; // past this a new ring degrades to the blocking path, never UB
+    // The slot's conn for ring `q` (appending its slot on first sight), or null if q is null or the table is
+    // full -> caller falls back to the blocking path.
+    net::craft_async_conn* conn_for(::io_uring* q);
+    std::array< queue_slot, k_max_queues > slots_;
+    std::atomic< std::size_t > n_slots_{0};
+    std::mutex slots_mu_; // guards the append only; the steady-state IO path never takes it
     uint32_t max_tx_{
         wire::k_default_max_tx}; // the volume max transfer PAYLOAD; a safe ceiling until login learns it from login_rsp
     uint32_t lba_{0};            // the volume block size (login_rsp); with max_tx_ it sizes the on-ring parse bound

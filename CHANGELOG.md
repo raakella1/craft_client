@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.0
+
+### Changed
+- **BREAKING -- multi-queue (blk-mq) rings: the ring travels with the verb; `prepare_for_async` is gone.**
+  Every mid-session verb now has an async overload taking the caller's io_uring right after the handle (the
+  ublk parameter order): `write(c, q, ...)`, `read(c, q, ...)`, `flush(c, q)`, `drive_keepalives(c, q, ...)`.
+  The ringless forms remain and are the blocking tier (transport-internal completion: reference-model pool /
+  session-mgr thread). A driver with `nr_hw_queues` rings calls the async verbs concurrently, each queue
+  thread passing its own ring: the TCP proxy keeps one lazily-opened `craft_async_conn` per (ring, replica) --
+  the transport.md `nr_hw_queues x N` connection grid, each data socket HELO-bound at the shared term, each
+  with its own `request_id` space -- selected by a lock-free ring-pointer scan (append-only slot table; the
+  registration mutex is off the steady-state path). AFFINITY IS THE CALLER'S CONTRACT, as with a raw io_uring:
+  a ring is passed only from the thread that owns and reaps it, so each connection stays thread-confined by
+  construction and `craft_async_conn` keeps its no-locks design. One op's whole leg chain (broadcast legs,
+  read failovers, the keep_alives/resolutions it spawns) rides the ring it was called with. Internally
+  `craft_replica`'s mid-session verbs take a leading `::io_uring* q` and the `prepare_for_async` virtual is
+  removed; the mem model takes the ring per call (no stored ring). Ordering contract (unchanged in spirit,
+  now per queue): login happens-before any queue's first verb; all queues quiesce and exit their rings before
+  logout / teardown.
+- `max_inflight` (make_client) documented as the AGGREGATE in-flight bound across all queues -- a blk-mq
+  driver passes `nr_hw_queues x queue_depth`.
+- Migration note: `drive_keepalives(c, 0)` with a LITERAL zero exclude index no longer compiles (0 converts
+  equally to `std::size_t` and a null `::io_uring*`). Write `std::size_t{0}` or pass a ring. Rings are
+  remembered by address for the client's whole life: every ring passed must outlive the client.
+- Keep_alive / resolution single-flight stays per-member CLIENT-WIDE, not per queue (liveness needs one
+  keep_alive per member); whichever queue wins a leg fires it on its own ring.
+
+### Added
+- `craft_cluster_server::connections_accepted()` (test observability): witnesses the connection grid --
+  `nr_hw_queues x N` data sockets + the 1 admin LOGIN socket.
+- Multi-queue tests: `CraftAsyncMem.MultiQueueWriteReadRoundTrip`, `CraftAsyncMem.BlockingTierCoexistsWithRings`,
+  `CraftAsyncTcp.MultiQueueGridOverTcp` -- Q threads x Q rings driving one shared client, data verified per
+  queue, dLSN density and the grid's socket count asserted.
+
 ## 0.2.0
 
 ### Changed

@@ -65,11 +65,11 @@ TcpCluster make_tcp_cluster(uint32_t n, std::chrono::milliseconds op_timeout = s
 }
 
 bool wr(craft::craft_client& c, uint64_t off_blk, std::vector< uint8_t >& buf) {
-    return rg(c.write(blk(off_blk), buf.size(), one_iov(buf))).has_value();
+    return rg(c.write(nullptr, blk(off_blk), buf.size(), one_iov(buf))).has_value();
 }
 std::vector< uint8_t > rd(craft::craft_client& c, uint64_t off_blk, uint64_t nblk = 1) {
     std::vector< uint8_t > dest(nblk * PAGE, 0xEE);
-    auto r = rg(c.read(blk(off_blk), nblk * PAGE, one_iov(dest)));
+    auto r = rg(c.read(nullptr, blk(off_blk), nblk * PAGE, one_iov(dest)));
     EXPECT_TRUE(r.has_value());
     return dest;
 }
@@ -122,7 +122,7 @@ TEST(CraftClientTcp, N3_KeepAliveAdvancesReclaimFloor) {
     auto& c = *tc.client;
     auto buf = page_of(0x5A);
     EXPECT_TRUE(wr(c, 0, buf));
-    EXPECT_TRUE(rg(c.flush()).has_value());
+    EXPECT_TRUE(rg(c.flush(nullptr)).has_value());
     EXPECT_GE(c.all_committed_lsn(), 0);
 }
 

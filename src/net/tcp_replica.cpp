@@ -15,6 +15,7 @@
 
 #include "net/tcp_replica.hpp"
 
+#include <cassert>
 #include <cstring>
 #include <span>
 #include <utility>
@@ -79,6 +80,44 @@ CraftTcpReplica::CraftTcpReplica(std::string host, uint16_t port, peer_id_t id, 
         op_timeout_{op_timeout},
         mgr_{net::craft_session_mgr::get()} {}
 
+net::craft_async_conn* CraftTcpReplica::conn_for(::io_uring* q) {
+    if (nullptr == q) return nullptr;
+    // Steady state: an acquire load of the published count, then a pointer scan. Slots are append-only and a
+    // slot is fully built before n_slots_ advances over it, so everything below `n` is safe to read lock-free.
+    std::size_t const n = n_slots_.load(std::memory_order_acquire);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (slots_[i].ring == q) {
+            assert(slots_[i].owner == std::this_thread::get_id() &&
+                   "a ring must only be passed from its owner thread");
+            return slots_[i].conn.get();
+        }
+    }
+    // Table permanently full: the miss can never seat (append-only, monotone), so stay lock-free on the
+    // degraded tier too -- and be LOUD in debug: past the cap this queue's verbs silently change resumption
+    // thread (blocking tier), which a driver counting on ring affinity must find out about at test time.
+    if (n == k_max_queues) {
+        assert(!"conn_for: ring table full (k_max_queues) -- this queue degrades to the blocking path");
+        return nullptr;
+    }
+    // First verb from this ring: append its slot. Rare (once per queue per session), so the lock is off the
+    // steady-state path; the re-scan under it covers a racing append of the SAME ring (contract violation, but
+    // double-constructing a conn would be worse than tolerating it).
+    std::lock_guard< std::mutex > g{slots_mu_};
+    std::size_t const m = n_slots_.load(std::memory_order_relaxed);
+    for (std::size_t i = n; i < m; ++i) {
+        if (slots_[i].ring == q) return slots_[i].conn.get();
+    }
+    if (m == k_max_queues) return nullptr; // table full: this queue degrades to the blocking path
+    auto& s = slots_[m];
+    s.ring = q;
+    s.conn = std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), q);
+#ifndef NDEBUG
+    s.owner = std::this_thread::get_id();
+#endif
+    n_slots_.store(m + 1, std::memory_order_release); // publish AFTER the slot is complete
+    return s.conn.get();
+}
+
 void CraftTcpReplica::shutdown() {
     // WIRE + SERVER time, per op class -- everything craft_client does is ABOVE this proxy and excluded. If the
     // read average here tracks the driver's read latency, the client is WAITING and the cost is the wire or the
@@ -94,11 +133,21 @@ void CraftTcpReplica::shutdown() {
     dump("read", rt_read_);
     dump("write", rt_write_);
     dump("keepalive", rt_keepalive_);
-    if (aconn_ && aconn_->n_reply() > 0) {
-        LOGINFO("craft_rt {}:{} pump      recvs={} replies={} recvs/reply={:.2f} avg_recv={:.0f}B", host_, port_,
-                aconn_->n_recv(), aconn_->n_reply(),
-                static_cast< double >(aconn_->n_recv()) / static_cast< double >(aconn_->n_reply()),
-                static_cast< double >(aconn_->n_recv_bytes()) / static_cast< double >(aconn_->n_recv()));
+    // Aggregate the pump stats across the whole per-ring conn grid. shutdown() runs post-quiesce (every ring
+    // exited), so the plain per-conn counters are safe to read from here.
+    uint64_t recvs = 0, replies = 0, recv_bytes = 0;
+    for (std::size_t i = 0, n = n_slots_.load(std::memory_order_acquire); i < n; ++i) {
+        auto const& c = slots_[i].conn;
+        if (!c) continue;
+        recvs += c->n_recv();
+        replies += c->n_reply();
+        recv_bytes += c->n_recv_bytes();
+    }
+    if (replies > 0 && recvs > 0) {
+        LOGINFO("craft_rt {}:{} pump      recvs={} replies={} recvs/reply={:.2f} avg_recv={:.0f}B queues={}", host_,
+                port_, recvs, replies, static_cast< double >(recvs) / static_cast< double >(replies),
+                static_cast< double >(recv_bytes) / static_cast< double >(recvs),
+                n_slots_.load(std::memory_order_relaxed));
     }
 #endif
     {
@@ -220,7 +269,8 @@ async_status CraftTcpReplica::logout(client_hdr hdr) {
     co_return sisl::ok();
 }
 
-async_result< lsn_pair > CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+async_result< lsn_pair > CraftTcpReplica::write(::io_uring* q, client_hdr hdr, int64_t dlsn, uint64_t addr,
+                                                uint64_t len,
                                                 sisl::sg_list data) {
     // Serialize the payload NOW, on the CALLER's thread, before the first suspension. This write may be a
     // straggler that keeps running after craft_client acked at quorum and the caller recycled its buffer, so
@@ -234,14 +284,12 @@ async_result< lsn_pair > CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, ui
             payload.insert(payload.end(), p, p + iov.iov_len);
         }
     }
-    if (ring_) { // ── on-ring data path: lazily HELO the data fd at hdr.term, then send over the caller's ring ──
-        if (!aconn_)
-            aconn_ =
-                std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
-        if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+    // ── on-ring data path: this queue's conn, lazily HELO'd at hdr.term, sends over the caller's ring ──
+    if (auto* conn = conn_for(q)) {
+        if (auto e = co_await conn->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
         auto const t0 = std::chrono::steady_clock::now();
-        auto r = co_await aconn_->write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
+        auto r = co_await conn->write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
         rt_write_.add(ns_since(t0));
         if (!r) co_return std::unexpected(net_to_error(r.error()));
         if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
@@ -257,8 +305,8 @@ async_result< lsn_pair > CraftTcpReplica::write(client_hdr hdr, int64_t dlsn, ui
     co_return lsn_pair{r->commit_lsn, r->last_append_lsn};
 }
 
-async_result< read_result > CraftTcpReplica::read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                  sisl::sg_list dest) {
+async_result< read_result > CraftTcpReplica::read(::io_uring* q, client_hdr hdr, int64_t read_lsn, uint64_t addr,
+                                                  uint64_t len, sisl::sg_list dest) {
     // Single-iovec dest: fill it in place. Otherwise read into scratch and scatter into the dest iovecs. Pure
     // span math -- safe on the caller's thread before either path suspends.
     bool const inplace = dest.iovs.size() == 1 && dest.iovs[0].iov_len >= len;
@@ -272,14 +320,11 @@ async_result< read_result > CraftTcpReplica::read(client_hdr hdr, int64_t read_l
     }
 
     net::read_reply reply;
-    if (ring_) { // ── on-ring data path ──
-        if (!aconn_)
-            aconn_ =
-                std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
-        if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+    if (auto* conn = conn_for(q)) { // ── on-ring data path ──
+        if (auto e = co_await conn->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
         auto const t0 = std::chrono::steady_clock::now();
-        auto r = co_await aconn_->read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
+        auto r = co_await conn->read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
         rt_read_.add(ns_since(t0));
         if (!r) co_return std::unexpected(net_to_error(r.error()));
         reply = std::move(*r);
@@ -305,15 +350,12 @@ async_result< read_result > CraftTcpReplica::read(client_hdr hdr, int64_t read_l
     co_return read_result{to_io_extents(reply.extents), lsn_pair{reply.commit_lsn, reply.last_append_lsn}};
 }
 
-async_result< lsn_pair > CraftTcpReplica::keep_alive(client_hdr hdr) {
-    if (ring_) { // ── on-ring data path ──
-        if (!aconn_)
-            aconn_ =
-                std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
-        if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+async_result< lsn_pair > CraftTcpReplica::keep_alive(::io_uring* q, client_hdr hdr) {
+    if (auto* conn = conn_for(q)) { // ── on-ring data path ──
+        if (auto e = co_await conn->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
         auto const t0 = std::chrono::steady_clock::now();
-        auto r = co_await aconn_->keep_alive(hdr.commit_lsn, hdr.all_committed_lsn);
+        auto r = co_await conn->keep_alive(hdr.commit_lsn, hdr.all_committed_lsn);
         rt_keepalive_.add(ns_since(t0));
         if (!r) co_return std::unexpected(net_to_error(r.error()));
         if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
@@ -329,16 +371,14 @@ async_result< lsn_pair > CraftTcpReplica::keep_alive(client_hdr hdr) {
     co_return lsn_pair{r->commit_lsn, r->last_append_lsn};
 }
 
-async_result< resolution_result > CraftTcpReplica::request_resolution(client_hdr hdr, int64_t upto) {
-    if (ring_) { // ── on-ring: this fires from the write path's failure branch, i.e. FROM the ring thread in async
-                 // mode, so it must not hop to a blocking round-trip. A round is slow leader work, but the pump
-                 // demuxes replies by request_id, so the parked leg costs the data ops in flight nothing.
-        if (!aconn_)
-            aconn_ =
-                std::make_unique< net::craft_async_conn >(host_, port_, wire::framed_body_max(max_tx_, lba_), ring_);
-        if (auto e = co_await aconn_->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+async_result< resolution_result > CraftTcpReplica::request_resolution(::io_uring* q, client_hdr hdr, int64_t upto) {
+    // On-ring: this fires from the write path's failure branch, i.e. FROM a queue thread in async mode, so it
+    // must not hop to a blocking round-trip. A round is slow leader work, but the pump demuxes replies by
+    // request_id, so the parked leg costs the data ops in flight nothing.
+    if (auto* conn = conn_for(q)) {
+        if (auto e = co_await conn->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
-        auto r = co_await aconn_->resolve(upto, hdr.commit_lsn, hdr.all_committed_lsn);
+        auto r = co_await conn->resolve(upto, hdr.commit_lsn, hdr.all_committed_lsn);
         if (!r) co_return std::unexpected(net_to_error(r.error()));
         if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
         co_return resolution_result{r->resolved_upto, std::move(r->empty_slots)};

@@ -56,7 +56,7 @@ struct read_out {
 };
 read_out rd(MemCraftReplica& r, uint64_t term, int64_t H, uint64_t lba, uint64_t nblk, int64_t commit = NO_COMMIT) {
     std::vector< uint8_t > dest(nblk * PAGE, 0xEE);
-    auto rr = rg(r.read(chdr(term, commit), H, blk(lba), blk(nblk), one_iov(dest)));
+    auto rr = rg(r.read(nullptr, chdr(term, commit), H, blk(lba), blk(nblk), one_iov(dest)));
     if (!rr.has_value()) return {false, rr.error(), {}, {}};
     return {true, {}, std::move(rr->extents), std::move(dest)};
 }
@@ -96,10 +96,10 @@ TEST(CraftMemModel, WriteKeepAliveRead) {
     ASSERT_EQ(dl, -1);
     auto buf = page_of(0xAB);
     for (auto& r : g.replicas) {
-        ASSERT_TRUE(rg(r->write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+        ASSERT_TRUE(rg(r->write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
     }
     for (auto& r : g.replicas) { // keep_alive is the dedicated commit carrier; returns the achieved pair
-        auto c = rg(r->keep_alive(chdr(term, /*commit_lsn*/ 0)));
+        auto c = rg(r->keep_alive(nullptr, chdr(term, /*commit_lsn*/ 0)));
         ASSERT_TRUE(c.has_value());
         EXPECT_EQ(c->commit_lsn, 0);
         EXPECT_EQ(c->last_append_lsn, 0);
@@ -119,9 +119,9 @@ TEST(CraftMemModel, OverlayReadAboveCommittedHole) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto b0 = page_of(1), b1 = page_of(2);
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(5), blk(1), one_iov(b0))).has_value());
-    ASSERT_TRUE(rg(r.write(chdr(term), 1, blk(6), blk(1), one_iov(b1))).has_value());
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 0))).has_value()); // apply dLSN 0 only; dLSN 1 stays in overlay
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(b0))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 1, blk(6), blk(1), one_iov(b1))).has_value());
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 0))).has_value()); // apply dLSN 0 only; dLSN 1 stays in overlay
 
     auto out = rd(r, term, /*H*/ 1, 5, 2); // block 5 applied, block 6 from overlay
     ASSERT_TRUE(out.ok);
@@ -146,7 +146,7 @@ TEST(CraftMemModel, HorizonClampHidesHeldWrite) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto b5 = page_of(9);
-    ASSERT_TRUE(rg(r.write(chdr(term), 5, blk(10), blk(1), one_iov(b5))).has_value()); // sub-quorum tail
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 5, blk(10), blk(1), one_iov(b5))).has_value()); // sub-quorum tail
 
     auto clamped = rd(r, term, /*H*/ 4, 10, 1);
     ASSERT_TRUE(clamped.ok);
@@ -167,13 +167,13 @@ TEST(CraftMemModel, ZeroWriteReadsAsHole) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto data = page_of(7);
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(7), blk(1), one_iov(data))).has_value());
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 0))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(7), blk(1), one_iov(data))).has_value());
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 0))).has_value());
     EXPECT_FALSE(rd(r, term, 0, 7, 1).layout[0].hole); // data present
 
     // empty sg_list => zero write. `len` (blk(1)) is the authoritative range to unmap.
-    ASSERT_TRUE(rg(r.write(chdr(term), 1, blk(7), blk(1), sisl::sg_list{})).has_value());
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 1))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 1, blk(7), blk(1), sisl::sg_list{})).has_value());
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 1))).has_value());
     auto out = rd(r, term, 1, 7, 1);
     ASSERT_TRUE(out.ok);
     ASSERT_EQ(out.layout.size(), 1u);
@@ -187,8 +187,8 @@ TEST(CraftMemModel, AllZeroDataCollapsesToHole) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto zeros = page_of(0); // all-zero bytes, written as a normal (non-empty) data write
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(8), blk(1), one_iov(zeros))).has_value());
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 0))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(8), blk(1), one_iov(zeros))).has_value());
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 0))).has_value());
     auto out = rd(r, term, 0, 8, 1);
     ASSERT_TRUE(out.ok);
     ASSERT_EQ(out.layout.size(), 1u);
@@ -202,10 +202,10 @@ TEST(CraftMemModel, CommitStallsAtGap) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto buf = page_of(3);
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
-    ASSERT_TRUE(rg(r.write(chdr(term), 2, blk(6), blk(1), one_iov(buf))).has_value()); // gap at dLSN 1
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 2, blk(6), blk(1), one_iov(buf))).has_value()); // gap at dLSN 1
 
-    auto c = rg(r.keep_alive(chdr(term, 2)));
+    auto c = rg(r.keep_alive(nullptr, chdr(term, 2)));
     ASSERT_TRUE(c.has_value());
     EXPECT_EQ(c->commit_lsn, 0); // stalled below the missing dLSN 1
     EXPECT_EQ(c->last_append_lsn, 2);
@@ -222,9 +222,9 @@ TEST(CraftMemModel, CommitPiggybacksOnWrite) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto b0 = page_of(0x11), b1 = page_of(0x22);
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(5), blk(1), one_iov(b0))).has_value()); // no commit yet
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(b0))).has_value()); // no commit yet
     ASSERT_TRUE(
-        rg(r.write(chdr(term, /*commit_lsn*/ 0), 1, blk(6), blk(1), one_iov(b1))).has_value()); // rides commit 0
+        rg(r.write(nullptr, chdr(term, /*commit_lsn*/ 0), 1, blk(6), blk(1), one_iov(b1))).has_value()); // rides commit 0
 
     auto ls = rg(r.get_lsns());
     ASSERT_TRUE(ls.has_value());
@@ -242,7 +242,7 @@ TEST(CraftMemModel, CommitPiggybacksOnRead) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto buf = page_of(0x33);
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
     ASSERT_EQ(rg(r.get_lsns())->commit_lsn, -1); // not committed yet
 
     auto out = rd(r, term, /*H*/ 0, 5, 1, /*commit_lsn*/ 0); // read advances the frontier to 0
@@ -258,10 +258,10 @@ TEST(CraftMemModel, WriteTermFencing) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto buf = page_of(1);
-    auto bad = rg(r.write(chdr(term + 1), 0, blk(5), blk(1), one_iov(buf)));
+    auto bad = rg(r.write(nullptr, chdr(term + 1), 0, blk(5), blk(1), one_iov(buf)));
     ASSERT_FALSE(bad.has_value());
     EXPECT_EQ(bad.error(), make_error_condition(craft_error::STALE_TERM));
-    EXPECT_TRUE(rg(r.write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+    EXPECT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
 }
 
 // 11. keep_alive is ALSO term-fenced -- a stale client must not reset the liveness watchdog.
@@ -269,10 +269,10 @@ TEST(CraftMemModel, KeepAliveIsTermFenced) {
     auto g = make_mem_replica_group(new_vol(), 3, PAGE);
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
-    auto stale = rg(r.keep_alive(chdr(term + 1, 0)));
+    auto stale = rg(r.keep_alive(nullptr, chdr(term + 1, 0)));
     ASSERT_FALSE(stale.has_value());
     EXPECT_EQ(stale.error(), make_error_condition(craft_error::STALE_TERM));
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, -1))).has_value()); // current term is accepted
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, -1))).has_value()); // current term is accepted
 }
 
 // 12. misaligned addr/len are rejected server-side with invalid_argument.
@@ -283,16 +283,16 @@ TEST(CraftMemModel, MisalignedIoRejected) {
     auto buf = page_of(1);
     auto const einval = std::make_error_condition(std::errc::invalid_argument);
 
-    auto bad_addr = rg(r.write(chdr(term), 0, /*addr*/ 1, blk(1), one_iov(buf)));
+    auto bad_addr = rg(r.write(nullptr, chdr(term), 0, /*addr*/ 1, blk(1), one_iov(buf)));
     ASSERT_FALSE(bad_addr.has_value());
     EXPECT_EQ(bad_addr.error(), einval);
 
-    auto bad_len = rg(r.write(chdr(term), 0, blk(5), /*len*/ 100, one_iov(buf)));
+    auto bad_len = rg(r.write(nullptr, chdr(term), 0, blk(5), /*len*/ 100, one_iov(buf)));
     ASSERT_FALSE(bad_len.has_value());
     EXPECT_EQ(bad_len.error(), einval);
 
     std::vector< uint8_t > dest(PAGE);
-    auto bad_read = rg(r.read(chdr(term), 0, /*addr*/ 3, blk(1), one_iov(dest)));
+    auto bad_read = rg(r.read(nullptr, chdr(term), 0, /*addr*/ 3, blk(1), one_iov(dest)));
     ASSERT_FALSE(bad_read.has_value());
     EXPECT_EQ(bad_read.error(), einval);
 }
@@ -303,11 +303,11 @@ TEST(CraftMemModel, ReplicaDownFault) {
     auto [term, dl] = login_ok(g);
     auto buf = page_of(1);
     g.replicas[1]->set_up(false); // the knob is on the replica now (was g.net->set_up(id, false))
-    auto down = rg(g.replicas[1]->write(chdr(term), 0, blk(5), blk(1), one_iov(buf)));
+    auto down = rg(g.replicas[1]->write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf)));
     ASSERT_FALSE(down.has_value());
     EXPECT_EQ(down.error(), make_error_condition(craft_error::REPLICA_DOWN));
-    EXPECT_TRUE(rg(g.replicas[0]->write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
-    EXPECT_TRUE(rg(g.replicas[2]->write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+    EXPECT_TRUE(rg(g.replicas[0]->write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+    EXPECT_TRUE(rg(g.replicas[2]->write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
     g.replicas[1]->set_up(true);
 }
 
@@ -319,13 +319,13 @@ TEST(CraftMemModel, SubQuorumFault) {
     g.net->force_subquorum({g.replicas[0]->id()}); // only replica 0 accepts the next writes
     int acks = 0;
     for (auto& r : g.replicas) {
-        if (rg(r->write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value()) ++acks;
+        if (rg(r->write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value()) ++acks;
     }
     EXPECT_EQ(acks, 1); // minority: sub-quorum, not durable
     g.net->clear_faults();
     acks = 0;
     for (auto& r : g.replicas) {
-        if (rg(r->write(chdr(term), 1, blk(5), blk(1), one_iov(buf))).has_value()) ++acks;
+        if (rg(r->write(nullptr, chdr(term), 1, blk(5), blk(1), one_iov(buf))).has_value()) ++acks;
     }
     EXPECT_EQ(acks, 3); // all members accept again
 }
@@ -339,7 +339,7 @@ TEST(CraftMemModel, LogoutClearsSession) {
     // All replicas should now reject the old term.
     auto buf = page_of(1);
     for (auto& r : g.replicas) {
-        auto bad = rg(r->write(chdr(term), 0, blk(5), blk(1), one_iov(buf)));
+        auto bad = rg(r->write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf)));
         ASSERT_FALSE(bad.has_value());
         EXPECT_EQ(bad.error(), make_error_condition(craft_error::STALE_TERM));
     }
@@ -363,7 +363,7 @@ TEST(CraftMemModel, LogoutIsTermFenced) {
     EXPECT_EQ(stale.error(), make_error_condition(craft_error::STALE_TERM));
     // Session is still alive; a write with the real term still works.
     auto buf = page_of(1);
-    EXPECT_TRUE(rg(g.replicas[0]->write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+    EXPECT_TRUE(rg(g.replicas[0]->write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
 }
 
 // --- latency injection: the straggler replica ---
@@ -390,7 +390,7 @@ TEST(CraftMemModel, DelayBelowTimeoutMerelySlowsTheOp) {
 
     auto buf = page_of(9);
     auto const t0 = std::chrono::steady_clock::now();
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(1), blk(1), one_iov(buf))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(1), blk(1), one_iov(buf))).has_value());
     EXPECT_GE(std::chrono::steady_clock::now() - t0, std::chrono::milliseconds{20});
     EXPECT_EQ(r.stats().last_append_lsn, 0);
 }
@@ -405,7 +405,7 @@ TEST(CraftMemModel, DelayPastTimeoutTimesOutButStillLandsLater) {
     r.set_delay(std::chrono::milliseconds{150});
 
     auto buf = page_of(9);
-    auto const w = rg(r.write(chdr(term), 0, blk(1), blk(1), one_iov(buf)));
+    auto const w = rg(r.write(nullptr, chdr(term), 0, blk(1), blk(1), one_iov(buf)));
     ASSERT_FALSE(w.has_value());
     EXPECT_EQ(w.error(), std::make_error_condition(std::errc::timed_out));
     EXPECT_EQ(r.stats().journal_slots, 0u) << "not delivered yet";
@@ -425,15 +425,15 @@ TEST(CraftMemModel, ClearingADelayLeavesAMissingSlotThatDrains) {
     g.net->set_op_timeout(std::chrono::milliseconds{10});
 
     auto buf = page_of(9);
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(1), blk(1), one_iov(buf))).has_value()); // dLSN 0 lands now
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(1), blk(1), one_iov(buf))).has_value()); // dLSN 0 lands now
 
     r.set_delay(std::chrono::milliseconds{300});
-    auto const slow = rg(r.write(chdr(term), 1, blk(2), blk(1), one_iov(buf))); // dLSN 1 times out
+    auto const slow = rg(r.write(nullptr, chdr(term), 1, blk(2), blk(1), one_iov(buf))); // dLSN 1 times out
     ASSERT_FALSE(slow.has_value());
 
     r.set_delay(std::chrono::milliseconds{0});                                         // straggler recovers
-    ASSERT_TRUE(rg(r.write(chdr(term), 2, blk(3), blk(1), one_iov(buf))).has_value()); // dLSN 2 lands now
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 2))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 2, blk(3), blk(1), one_iov(buf))).has_value()); // dLSN 2 lands now
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 2))).has_value());
 
     { // dLSN 1 is still in the transport: the journal has a hole and the frontier is pinned under it.
         auto const s = r.stats();
@@ -445,7 +445,7 @@ TEST(CraftMemModel, ClearingADelayLeavesAMissingSlotThatDrains) {
 
     // It arrives; the gap closes. A commit carrier is what actually advances the frontier over it.
     ASSERT_TRUE(eventually([&] { return r.stats().missing_count == 0u; }));
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 2))).has_value());
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 2))).has_value());
     auto const s = r.stats();
     EXPECT_EQ(s.journal_slots, 3u);
     EXPECT_EQ(s.commit_lsn, 2) << "frontier catches up once the hole is filled";
@@ -461,10 +461,10 @@ TEST(CraftMemModel, StatsReportsMissingSlots) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto buf = page_of(3);
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
-    ASSERT_TRUE(rg(r.write(chdr(term), 2, blk(6), blk(1), one_iov(buf))).has_value()); // gap at dLSN 1
-    ASSERT_TRUE(rg(r.write(chdr(term), 3, blk(7), blk(1), one_iov(buf))).has_value());
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 3))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 2, blk(6), blk(1), one_iov(buf))).has_value()); // gap at dLSN 1
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 3, blk(7), blk(1), one_iov(buf))).has_value());
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 3))).has_value());
 
     auto const s = r.stats();
     EXPECT_EQ(s.id, r.id());
@@ -490,9 +490,9 @@ TEST(CraftMemModel, StatsMissingSampleIsCappedButCountIsExact) {
     auto [term, dl] = login_ok(g);
     auto& r = *g.replicas[0];
     auto buf = page_of(3);
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
-    ASSERT_TRUE(rg(r.write(chdr(term), 100, blk(6), blk(1), one_iov(buf))).has_value());
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 100))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 100, blk(6), blk(1), one_iov(buf))).has_value());
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 100))).has_value());
 
     auto const s = r.stats();
     EXPECT_EQ(s.commit_lsn, 0);
@@ -511,8 +511,8 @@ TEST(CraftMemModel, StatsCountsZeroWritesAndMappedBlocks) {
     auto& r = *g.replicas[0];
 
     auto data = page_of(7, 2); // blocks 4 and 5
-    ASSERT_TRUE(rg(r.write(chdr(term), 0, blk(4), blk(2), one_iov(data))).has_value());
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 0))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(4), blk(2), one_iov(data))).has_value());
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 0))).has_value());
     {
         auto const s = r.stats();
         EXPECT_EQ(s.commit_lsn, 0);
@@ -522,8 +522,8 @@ TEST(CraftMemModel, StatsCountsZeroWritesAndMappedBlocks) {
         EXPECT_EQ(s.journal_data_bytes, 2ull * PAGE);
     }
 
-    ASSERT_TRUE(rg(r.write(chdr(term), 1, blk(4), blk(1), sisl::sg_list{})).has_value()); // zero write
-    ASSERT_TRUE(rg(r.keep_alive(chdr(term, 1))).has_value());
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 1, blk(4), blk(1), sisl::sg_list{})).has_value()); // zero write
+    ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 1))).has_value());
 
     auto const s = r.stats();
     EXPECT_EQ(s.commit_lsn, 1);

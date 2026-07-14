@@ -42,13 +42,15 @@ public:
                  uint32_t max_inflight = 128) :
             replicas_(std::move(replicas)), leader_(leader), tracker_(std::make_shared< dlsn_tracker >(max_inflight)) {}
 
+    // Mid-session verbs carry the caller's queue ring (`q`, null = the blocking tier) straight through to every
+    // backend leg they fan out -- one IO's whole leg chain rides one ring, so its resumptions all land back on
+    // that queue's reap thread. login/logout are ringless: they bracket every ring's lifetime.
     async_status login(uint64_t client_token);
-    async_result< size_t > write(uint64_t addr, uint64_t len, sisl::sg_list data);
-    async_result< size_t > read(uint64_t addr, uint64_t len, sisl::sg_list dest);
-    async_status flush();
+    async_result< size_t > write(::io_uring* q, uint64_t addr, uint64_t len, sisl::sg_list data);
+    async_result< size_t > read(::io_uring* q, uint64_t addr, uint64_t len, sisl::sg_list dest);
+    async_status flush(::io_uring* q);
     async_status logout();
-    void drive_keepalives(std::size_t exclude_idx);
-    void prepare_for_async(::io_uring* ring); // fan out the ring to every backend's on-ring data path
+    void drive_keepalives(::io_uring* q, std::size_t exclude_idx);
 
     uint32_t lba_size() const { return lba_size_; }
     uint64_t capacity() const { return capacity_; }
@@ -75,13 +77,14 @@ private:
     // while fold_to() itself would take the overlay's shared_lock every time.
     void maybe_fold();
     std::optional< std::error_condition > precheck(uint64_t addr, uint64_t len) const;
-    async_result< lsn_pair > issue_plan(std::shared_ptr< craft_replica > const& target, client_hdr hdr,
+    async_result< lsn_pair > issue_plan(::io_uring* q, std::shared_ptr< craft_replica > const& target, client_hdr hdr,
                                         read_plan const& plan, uint64_t addr, uint64_t len, sisl::sg_list& dest);
     // Fire the client-requested resolution round for failed slot `upto`: record the want, then BROADCAST a
     // detached request to every peer without one outstanding (per-peer single-flight, the keep_alive
     // collapse) -- the client cannot know who leads mid-session, so whichever member is the leader resolves.
-    // Each leg captures the tracker's and router's shared_ptrs, never `this`.
-    void request_resolution_round(int64_t upto);
+    // Each leg captures the tracker's and router's shared_ptrs, never `this`; it rides the ring of the write
+    // whose failure fired it.
+    void request_resolution_round(::io_uring* q, int64_t upto);
 
     std::vector< std::shared_ptr< craft_replica > > replicas_;
     uint32_t leader_{0};

@@ -146,25 +146,22 @@ public:
     std::chrono::milliseconds delay() const;
 
     // ── craft_replica: client-facing ──
+    // A verb's leading `q` binds THAT op's delivery timer to the caller's ring (a SQE the ring owner's reap
+    // loop completes -- many legs in flight at once, QD>1, on the caller's thread) instead of a MemTransport
+    // pool hop. Null q keeps the pool path -- where a verb's awaiter RESUMES ON THE REPLICA'S POOL THREAD
+    // (freestanding tasks resume inline at completion). The CALLER owns the reap loop: with a non-null q it
+    // MUST drain the ring's CQEs (dispatch each managed one via sisl::async::complete_cqe_state) -- including
+    // the detached straggler legs -- or the submitted SQEs never fire and the ops hang.
     async_result< LoginResult > login(uint64_t client_token) override;
     async_status logout(client_hdr hdr) override;
-    async_result< lsn_pair > write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+    async_result< lsn_pair > write(::io_uring* q, client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
                                    sisl::sg_list data) override;
-    async_result< read_result > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
+    async_result< read_result > read(::io_uring* q, client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
                                      sisl::sg_list dest) override;
-    async_result< lsn_pair > keep_alive(client_hdr hdr) override;
+    async_result< lsn_pair > keep_alive(::io_uring* q, client_hdr hdr) override;
     // The client-requested resolution round: term-fenced, then delegated to the transport's cold path
     // (leader-only; the model's stand-in for the leader's SyncRSCommitLSN pre-resolution).
-    async_result< resolution_result > request_resolution(client_hdr hdr, int64_t upto) override;
-
-    // On-ring data path: bind write/read/keep_alive to `ring` so their delivery timer is a ring SQE the ring
-    // owner's reap loop completes (many legs in flight at once, QD>1, on the caller's thread) instead of a
-    // MemTransport pool hop. A null ring (the default) keeps the existing pool path -- where a verb's awaiter
-    // RESUMES ON THE REPLICA'S POOL THREAD (the freestanding tasks resume inline at completion; see
-    // craft_replica::prepare_for_async). The CALLER owns the reap loop: after this, it MUST drain the ring's
-    // CQEs (dispatch each managed one via sisl::async::complete_cqe_state) -- including the detached straggler
-    // legs -- or the submitted SQEs never fire and the ops hang.
-    void prepare_for_async(::io_uring* ring) noexcept override;
+    async_result< resolution_result > request_resolution(::io_uring* q, client_hdr hdr, int64_t upto) override;
 
     // ── craft_peer: the PEER plane (a holder answering another replica, never a client) ──
     // NOTE these are not yet reached THROUGH craft_peer: MemTransport's cold path (run_login / run_resolution) is
@@ -239,13 +236,15 @@ private:
     result< std::vector< JournalSlot > > do_fetch(std::vector< int64_t > const& lsns);
     result< resolution_result > do_resolve_local(client_hdr hdr, int64_t upto); // N=1 resolution (srv seam)
 
-    // ── on-ring transport (prepare_for_async) ──
-    // ring_delay suspends the calling leg on a timeout/nop SQE placed on ring_; the reap loop's
-    // complete_cqe_state resumes it. late_write is the detached straggler leg: a write whose delay ran past the
-    // client deadline lands here, late, after its own ring timer -- exactly the arrival that leaves a Missing
-    // slot behind at QD>1. `this` outlives it because the driver drains every ring timer before teardown.
-    async_status ring_delay(std::chrono::milliseconds d);
-    async_status late_write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+    // ── on-ring transport (a verb's non-null `q`) ──
+    // ring_delay suspends the calling leg on a timeout/nop SQE placed on `q`; the reap loop's
+    // complete_cqe_state resumes it. The ring is a parameter, not a member: each leg rides the ring its verb
+    // was called with, for the leg's whole life (a leg never leaves its queue). late_write is the detached
+    // straggler leg: a write whose delay ran past the client deadline lands here, late, after its own ring
+    // timer -- exactly the arrival that leaves a Missing slot behind at QD>1. `this` outlives it because the
+    // driver drains every ring timer before teardown.
+    async_status ring_delay(::io_uring* q, std::chrono::milliseconds d);
+    async_status late_write(::io_uring* q, client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
                             std::shared_ptr< std::vector< uint8_t > > bytes, std::chrono::milliseconds deliver);
 
     // helpers (mu_ held by caller)
@@ -287,7 +286,6 @@ private:
     replica_endpoint ep_;
     uint32_t page_size_;
     std::shared_ptr< MemTransport > net_;
-    ::io_uring* ring_{nullptr}; // prepare_for_async: the driver-owned ring the on-ring data path submits on
 
     CraftPartitionState state_;
     std::map< int64_t, MemJournalSlot > journal_; // dLSN -> slot (out-of-order arrival tolerated)

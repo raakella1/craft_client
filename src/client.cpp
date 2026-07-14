@@ -99,19 +99,19 @@ async_status craft_client::login(uint64_t client_token) {
 // when_quorum counts it, the same ordering the completion hook used to give record_completion). Feeding
 // EVERY leg matters: the fold needs to know when all legs finished before it decides a member missed the
 // write. Exceptions are swallowed as a non-ack so a throwing leg still reports its completion.
-static async_result< lsn_pair > write_leg(std::shared_ptr< craft_replica > h, std::shared_ptr< read_route_map > route,
-                                          client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len, sisl::sg_list data,
-                                          std::size_t idx) {
+static async_result< lsn_pair > write_leg(::io_uring* q, std::shared_ptr< craft_replica > h,
+                                          std::shared_ptr< read_route_map > route, client_hdr hdr, int64_t dlsn,
+                                          uint64_t addr, uint64_t len, sisl::sg_list data, std::size_t idx) {
     result< lsn_pair > r = std::unexpected(make_error_condition(craft_error::REPLICA_DOWN));
     try {
-        r = co_await h->write(hdr, dlsn, addr, len, std::move(data));
+        r = co_await h->write(q, hdr, dlsn, addr, len, std::move(data));
     } catch (...) {}
     route->record_completion(dlsn, idx, r.has_value());
     if (r.has_value()) route->advance_synced(idx, r->commit_lsn); // any round-trip refreshes the watermark
     co_return r;
 }
 
-async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg_list data) {
+async_result< size_t > craft_client::write(::io_uring* q, uint64_t addr, uint64_t len, sisl::sg_list data) {
     if (auto const e = precheck(addr, len)) co_return std::unexpected(*e);
 
     // Reserve the dLSN and record its range BEFORE the broadcast: any replica that can hold this slot implies a
@@ -128,7 +128,7 @@ async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg
     std::shared_ptr< std::vector< result< lsn_pair > > > results;
 
     if (replicas_.size() == 1) {
-        auto r = co_await write_leg(replicas_[0], route_, hdr, dlsn, addr, len, std::move(data), 0);
+        auto r = co_await write_leg(q, replicas_[0], route_, hdr, dlsn, addr, len, std::move(data), 0);
         acks = r.has_value() ? 1 : 0;
         results = std::make_shared< std::vector< result< lsn_pair > > >(1, std::move(r));
     } else {
@@ -136,11 +136,13 @@ async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg
         std::vector< async_result< lsn_pair > > futs;
         futs.reserve(replicas_.size());
         for (std::size_t i = 0; i < replicas_.size(); ++i) {
-            futs.push_back(write_leg(replicas_[i], route_, hdr, dlsn, addr, len, data, i));
+            futs.push_back(write_leg(q, replicas_[i], route_, hdr, dlsn, addr, len, data, i));
         }
-        auto q = co_await sisl::async::when_quorum(std::move(futs), quorum());
-        acks = q.acks;
-        results = std::move(q.results);
+        // `qr`, not `q`: the ring parameter stays nameable in this whole function (the failure branch below
+        // forwards it into the resolution round).
+        auto qr = co_await sisl::async::when_quorum(std::move(futs), quorum());
+        acks = qr.acks;
+        results = std::move(qr.results);
     }
 
     if (acks >= quorum()) {
@@ -175,7 +177,7 @@ async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg
     // A failed (sub-quorum, not provably-absent) slot pins the frontier until the leader fills or Empties it:
     // request the resolution round NOW (the design's client-request SyncRSCommitLSN trigger) instead of
     // waiting for a watchdog / periodic cadence that the client cannot see.
-    if (!provably_empty) request_resolution_round(dlsn);
+    if (!provably_empty) request_resolution_round(q, dlsn);
     co_return std::unexpected(last_err ? last_err : make_error_condition(craft_error::NO_QUORUM));
 }
 
@@ -188,12 +190,12 @@ async_result< size_t > craft_client::write(uint64_t addr, uint64_t len, sisl::sg
 // filled ones as acked with the router told first (note_filled) so reads route only to certain holders until
 // the commit_lsn certificates catch up. A leg that errors (member down, deposed term) also just ends: the
 // slot stays pinned and the next failed write re-fires the legs.
-static async_status fire_resolution(std::shared_ptr< craft_replica > h, std::size_t idx, uint64_t term,
+static async_status fire_resolution(::io_uring* q, std::shared_ptr< craft_replica > h, std::size_t idx, uint64_t term,
                                     std::shared_ptr< dlsn_tracker > tracker, std::shared_ptr< read_route_map > route) {
     for (;;) {
         while (auto const want = tracker->resolution_want()) {
             client_hdr const hdr{term, tracker->frontier(), route->all_committed()};
-            auto r = co_await h->request_resolution(hdr, *want);
+            auto r = co_await h->request_resolution(q, hdr, *want);
             if (!r.has_value()) { // NOT_LEADER / down / stale: this peer cannot resolve; leave the want alone
                 route->end_resolution(idx);
                 co_return ok();
@@ -208,14 +210,15 @@ static async_status fire_resolution(std::shared_ptr< craft_replica > h, std::siz
     }
 }
 
-void craft_client::request_resolution_round(int64_t upto) {
+void craft_client::request_resolution_round(::io_uring* q, int64_t upto) {
     tracker_->note_resolution_want(upto);
     // BROADCAST, not a leader walk: the client learned the leader at login and leadership may have moved
     // since -- mid-session it cannot know who leads. Every member gets the request, at most one outstanding
     // per peer (the keep_alive collapse); whichever member IS the leader runs the round, the rest answer
     // NOT_LEADER (a real replica may instead forward to its leader -- either way the client need not know).
+    // Each leg rides the failing write's ring, so its resumptions stay on that queue's reap thread.
     for (std::size_t m = 0; m < replicas_.size(); ++m) {
-        if (route_->try_begin_resolution(m)) fire_resolution(replicas_[m], m, term_, tracker_, route_).detach();
+        if (route_->try_begin_resolution(m)) fire_resolution(q, replicas_[m], m, term_, tracker_, route_).detach();
     }
 }
 
@@ -223,12 +226,12 @@ void craft_client::request_resolution_round(int64_t upto) {
 // watermarks (the highest across a split's segments -- same member, monotonic). Factored out of read() so the
 // router can retry it against the next eligible member on a transport failure. `dest` is copied per attempt
 // (descriptors only; both point at the caller's buffer), so a failover re-fills the same buffer.
-async_result< lsn_pair > craft_client::issue_plan(std::shared_ptr< craft_replica > const& target, client_hdr hdr,
-                                                  read_plan const& plan, uint64_t addr, uint64_t len,
+async_result< lsn_pair > craft_client::issue_plan(::io_uring* q, std::shared_ptr< craft_replica > const& target,
+                                                  client_hdr hdr, read_plan const& plan, uint64_t addr, uint64_t len,
                                                   sisl::sg_list& dest) {
     if (plan.size() == 1) {
         sisl::sg_list whole = dest;
-        auto r = co_await target->read(hdr, plan.front().H, addr, len, std::move(whole));
+        auto r = co_await target->read(q, hdr, plan.front().H, addr, len, std::move(whole));
         if (!r.has_value()) co_return std::unexpected(r.error());
         co_return r->lsns;
     }
@@ -242,7 +245,7 @@ async_result< lsn_pair > craft_client::issue_plan(std::shared_ptr< craft_replica
         sisl::sg_list sub;
         sub.size = seg.len;
         sub.iovs = slicer.next_iovs(static_cast< uint32_t >(seg.len));
-        futs.push_back(target->read(hdr, seg.H, seg.addr, seg.len, std::move(sub)));
+        futs.push_back(target->read(q, hdr, seg.H, seg.addr, seg.len, std::move(sub)));
     }
     lsn_pair lsns{-1, -1};
     // co_await hoisted out of the range-for initializer: GCC 16.1 ICEs (get_callee_fndecl) on the combined form.
@@ -255,7 +258,7 @@ async_result< lsn_pair > craft_client::issue_plan(std::shared_ptr< craft_replica
     co_return lsns;
 }
 
-async_result< size_t > craft_client::read(uint64_t addr, uint64_t len, sisl::sg_list dest) {
+async_result< size_t > craft_client::read(::io_uring* q, uint64_t addr, uint64_t len, sisl::sg_list dest) {
     if (auto const e = precheck(addr, len)) co_return std::unexpected(*e);
 
     auto const plan = co_await tracker_->plan_read(addr, len);
@@ -289,13 +292,13 @@ async_result< size_t > craft_client::read(uint64_t addr, uint64_t len, sisl::sg_
         if (!any_eligible) read_rotor = idx + 1; // next read on this queue thread starts at the following peer
         any_eligible = true;
 
-        auto r = co_await issue_plan(replicas_[idx], hdr, *plan, addr, len, dest);
+        auto r = co_await issue_plan(q, replicas_[idx], hdr, *plan, addr, len, dest);
         if (r.has_value()) {
             // The reply piggybacked the serving member's watermarks: feed them to the router (this is what
             // makes "the leg we served is fresh" literally true), then top up every leg this read did NOT
             // touch with a keep_alive (one outstanding per leg) so their sessions and watermarks refresh too.
             route_->advance_synced(idx, r->commit_lsn);
-            drive_keepalives(idx);
+            drive_keepalives(q, idx);
             co_return len;
         }
 
@@ -315,34 +318,29 @@ async_result< size_t > craft_client::read(uint64_t addr, uint64_t len, sisl::sg_
 // A detached keep_alive to one leg: fetch its commit/append and reset its session watchdog, feed the reply to
 // the router (advances synced_ -> the reclaim floor + recovery), then release the leg's one-outstanding flag.
 // Fire-and-forget, so it captures the map by shared_ptr (it may outlive the client) and the backend by value.
-static async_status fire_keepalive(std::shared_ptr< craft_replica > h, client_hdr hdr,
+static async_status fire_keepalive(::io_uring* q, std::shared_ptr< craft_replica > h, client_hdr hdr,
                                    std::shared_ptr< read_route_map > route, std::size_t idx) {
-    auto r = co_await h->keep_alive(hdr);
+    auto r = co_await h->keep_alive(q, hdr);
     if (r.has_value()) route->advance_synced(idx, r->commit_lsn);
     route->end_keepalive(idx);
     co_return ok();
 }
 
-void craft_client::drive_keepalives(std::size_t exclude_idx) {
+void craft_client::drive_keepalives(::io_uring* q, std::size_t exclude_idx) {
     if (term_ == 0) return; // no session yet: nothing to keep alive
     client_hdr const hdr = make_hdr();
     for (std::size_t m = 0; m < replicas_.size(); ++m) {
         if (m == exclude_idx) continue;
         // One outstanding keep_alive per leg is the whole collapse: a busy read stream tops a leg up again only
-        // once its previous keep_alive has completed, never one-per-read.
-        if (route_->try_begin_keepalive(m)) fire_keepalive(replicas_[m], hdr, route_, m).detach();
+        // once its previous keep_alive has completed, never one-per-read. The per-leg flag is process-wide, not
+        // per queue -- liveness needs ONE keep_alive per member -- so under blk-mq whichever queue thread wins
+        // the flag fires the leg, which then rides (and resumes on) THAT queue's ring; everything the detached
+        // leg touches (advance_synced, the flag itself) is atomic/lock-guarded in the router.
+        if (route_->try_begin_keepalive(m)) fire_keepalive(q, replicas_[m], hdr, route_, m).detach();
     }
 }
 
-void craft_client::prepare_for_async(::io_uring* ring) {
-    // Off-path fan-out: hand the host ring to every backend. Each decides for itself whether it can submit on
-    // it (the mem model + the on-ring TCP proxy do; a worker-thread transport keeps its own completion source).
-    for (auto& r : replicas_) {
-        if (r) r->prepare_for_async(ring);
-    }
-}
-
-async_status craft_client::flush() {
+async_status craft_client::flush(::io_uring* q) {
     // keep_alive is CRAFT's commit carrier AND how the client learns each member's achieved commit_lsn.
     // Broadcast it to EVERY replica: feed each reply to the router, which advances that member's synced_ -> the
     // set-wide all_committed reclaim floor (min across members) and clears Missing entries the member applied. A
@@ -352,7 +350,7 @@ async_status craft_client::flush() {
     std::vector< async_result< lsn_pair > > futs;
     futs.reserve(n);
     for (auto& h : replicas_)
-        futs.push_back(h->keep_alive(hdr));
+        futs.push_back(h->keep_alive(q, hdr));
 
     auto const results = co_await sisl::async::when_all(std::move(futs));
     bool any = false;
@@ -410,15 +408,23 @@ client_handle make_client(std::vector< std::shared_ptr< craft_replica > > replic
 
 async_status login(client_handle const& c, uint64_t client_token) { return c->login(client_token); }
 async_result< size_t > write(client_handle const& c, uint64_t addr, uint64_t len, sisl::sg_list data) {
-    return c->write(addr, len, std::move(data));
+    return c->write(nullptr, addr, len, std::move(data));
+}
+async_result< size_t > write(client_handle const& c, ::io_uring* q, uint64_t addr, uint64_t len, sisl::sg_list data) {
+    return c->write(q, addr, len, std::move(data));
 }
 async_result< size_t > read(client_handle const& c, uint64_t addr, uint64_t len, sisl::sg_list dest) {
-    return c->read(addr, len, std::move(dest));
+    return c->read(nullptr, addr, len, std::move(dest));
 }
-async_status flush(client_handle const& c) { return c->flush(); }
+async_result< size_t > read(client_handle const& c, ::io_uring* q, uint64_t addr, uint64_t len, sisl::sg_list dest) {
+    return c->read(q, addr, len, std::move(dest));
+}
+async_status flush(client_handle const& c, ::io_uring* q) { return c->flush(q); }
 async_status logout(client_handle const& c) { return c->logout(); }
-void drive_keepalives(client_handle const& c, std::size_t exclude_idx) { c->drive_keepalives(exclude_idx); }
-void prepare_for_async(client_handle const& c, ::io_uring* ring) { c->prepare_for_async(ring); }
+void drive_keepalives(client_handle const& c, std::size_t exclude_idx) { c->drive_keepalives(nullptr, exclude_idx); }
+void drive_keepalives(client_handle const& c, ::io_uring* q, std::size_t exclude_idx) {
+    c->drive_keepalives(q, exclude_idx);
+}
 
 uint32_t lba_size(client_handle const& c) { return c->lba_size(); }
 uint64_t capacity(client_handle const& c) { return c->capacity(); }

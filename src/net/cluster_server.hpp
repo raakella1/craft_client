@@ -75,6 +75,9 @@ public:
     void set_delay(std::size_t idx, std::chrono::milliseconds d);
 
     // ── test observability (read straight off replica `idx`, server-side, no wire) ──
+    // Total client connections ever accepted, across every member's listener. A blk-mq client's grid is
+    // nr_hw_queues x N data sockets + the 1 admin (LOGIN) socket -- the multi-queue test's witness.
+    std::size_t connections_accepted() const;
     std::size_t journal_slots(std::size_t idx) const; // applied+journaled data slots (proves a write landed)
     uint64_t replica_term(std::size_t idx) const;     // the replica's session term (0 = no live session)
     // Read [addr, addr+len) bytes at horizon `read_lsn` off replica `idx` into `dest` (sized to `len`, holes

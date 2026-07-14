@@ -35,7 +35,7 @@ The result vocabulary itself (`result<T>` / `async_result<T>`) is owned by **sis
 `sisl::async::light_result` -- the freestanding, stdexec-free task) so a domain error (`craft_error`) rides the
 type-erased `std::error_condition` and no layer forks the vocabulary. The verbs are co_await-able from **any**
 coroutine (a ublk driver's `disk_task`, an `exec::task`, another `light_task`); the awaiting coroutine resumes
-on the thread that completes the op -- the ring's reap thread once `prepare_for_async` binds a ring, else a
+on the thread that completes the op -- the reap thread of the ring passed to the verb's async overload, else a
 transport-internal thread. Blocking callers use `sisl::async::sync_get`.
 
 ## Public API surface
@@ -190,12 +190,14 @@ The three roles map cleanly onto three repos, and **HomeBlocks is only ever the 
 
 - **Ack at quorum, never at the slowest.** A write returns as soon as a majority acks; the straggler keeps
   running detached and still lands the write late (delivered, not lost).
-- **One admin thread per process; no client threads on the data path.** Once a ring is bound
-  (`prepare_for_async`), every mid-session verb -- write, read, keep_alive, resolve -- runs on the caller's
-  io_uring. Blocking admin work (login/logout, which bracket the ring's lifetime) serializes on a single
-  process-wide session-mgr thread shared by every proxy: a 50-disk RAID0 at N=3 idles one thread, not 150,
-  and it retires when the last disk detaches. Connects are always deadline-bounded, so a blackholed replica
-  cannot park that thread.
+- **One admin thread per process; no client threads on the data path.** Every mid-session verb -- write, read,
+  keep_alive, resolve -- has an async overload that takes the caller's io_uring and runs on it. Multi-queue
+  (blk-mq) falls out of that: each of a driver's `nr_hw_queues` threads passes its own ring, and the transport
+  keeps one data connection per (queue, replica) -- the `nr_hw_queues x N` grid -- so no queue ever crosses
+  another's thread. Blocking admin work (login/logout, which bracket every ring's lifetime) serializes on a
+  single process-wide session-mgr thread shared by every proxy: a 50-disk RAID0 at N=3 idles one thread, not
+  150, and it retires when the last disk detaches. Connects are always deadline-bounded, so a blackholed
+  replica cannot park that thread.
 - **Term-fenced single writer.** Every IO carries the session `term`; a deposed client's IOs (even keep_alive)
   are rejected `STALE_TERM`, so it cannot keep the session alive.
 - **Client drives commit (piggybacked, no standalone verb).** The client stamps `commit_lsn` on every

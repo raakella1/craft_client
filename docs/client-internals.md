@@ -428,7 +428,7 @@ anybody -- teaches the client nothing.
 | 4 | A peer that **times out may still have applied** the write | Counting it as a deterministic reject resolves the slot `Empty` and advances `F` past a dLSN a replica later applies. Divergence. | `ClearingADelayLeavesAMissingSlotThatDrains` |
 | 5 | `REPLICA_DOWN` means **"I never delivered it"** | Only the transport can say that; a down server cannot answer for itself. It is what lets the client count it as a deterministic reject. | `N3_AllReplicasRefuseResolvesEmptyAndReleasesTheFrontier` |
 | 6 | **Either** serialize `data` before suspending, **or** signal when the send completes | The client acks at quorum with stragglers in flight, so the caller's buffer must outlive every *send* while only a quorum of *replies* is awaited. | `N3_StragglerWriteLandsIntactAfterTheClientReturned` |
-| 7 | The reply must be **reapable as a CQE on the issuing queue's ring** | The ublk per-IO coroutine may only be resumed by its own queue thread (see #1: the client migrates coroutines by itself). The on-ring transport submits its socket ops on that queue's io_uring, so the reply is a CQE `run_queue_loop` already reaps on the queue thread. | `prepare_for_async` + the on-ring transport |
+| 7 | The reply must be **reapable as a CQE on the issuing queue's ring** | The ublk per-IO coroutine may only be resumed by its own queue thread (see #1: the client migrates coroutines by itself). The on-ring transport submits its socket ops on that queue's io_uring, so the reply is a CQE `run_queue_loop` already reaps on the queue thread. | the ring-taking async verbs + the on-ring transport |
 
 Requirement 7 is what the driver is built around, and the on-ring transport now satisfies it directly. Each
 replica leg submits its socket op -- an `IORING_OP_SEND` / `RECV` (TCP), or a timer `IORING_OP_TIMEOUT` (the mem
@@ -439,9 +439,10 @@ hardware queue over that queue's io_uring, and that is the whole runtime.
 
 An earlier cut, when a transport completed on a foreign pool thread, bounced that final hop back to the queue
 thread through an eventfd + `POLL_ADD` standing in for a socket. The socket is real now and polled on the queue
-ring, so the stand-in is gone: the per-IO worker resumes the ublk coroutine directly (this holds for a SINGLE
-queue -- one client ring is bound, so a second queue is rejected until per-queue rings land). The `request_id`
-still indexes the reply's landing pad, which is what a ublk tag already is.
+ring, so the stand-in is gone: the per-IO worker resumes the ublk coroutine directly. This holds for EVERY
+queue: each verb carries its queue's ring, the transport keeps one data connection per (ring, replica) -- the
+`nr_hw_queues x N` grid -- and an op's whole leg chain submits and resumes on the one ring it was called with.
+The `request_id` still indexes the reply's landing pad, per connection, which is what a ublk tag already is.
 
 Requirement 6 is the one to watch, because the shim currently **grants it for free** and that is a choice, not
 a fact. `MemTransport::take_payload` copies at issue, before any suspension, so today's client may recycle its
@@ -503,9 +504,10 @@ replica -- which is precisely the seam a real transport will occupy.
 * **The per-IO worker resumes the ublk coroutine directly, on the queue thread.** With the on-ring transport
   every reply CQE is reaped on the queue's own ring, so `run_craft_io` finishes on the queue thread and resumes
   the parked per-IO `cqe_state` in place -- no cross-thread hand-off, no eventfd. This is correct only because
-  the transport completes on that thread (requirement 7), and it holds for a single queue, which `prepare`
-  enforces. (`resolve()` still ends in `gate_.signal()`, which resumes a suspended reader inline on the
-  resolving thread; on one queue that thread is the queue thread.)
+  the transport completes on that thread (requirement 7), which holds per queue: a verb submits its whole leg
+  chain on the ring it was passed, so no queue's completion ever lands on another's thread. (`resolve()` still
+  ends in `gate_.signal()`, which resumes a suspended reader inline on the resolving thread -- the queue thread
+  of whichever queue drove that resolution.)
 * **The driver's completion path takes no lock and allocates nothing.** The per-IO `cqe_state` lives in the
   tag's pre-reserved pool, so its pointer is stable; the direct resume is a plain store of the result plus a
   `coroutine_handle::resume()` on the queue thread -- no landing-pad cell, no MPSC queue, no `std::function`

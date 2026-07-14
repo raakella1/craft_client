@@ -75,11 +75,11 @@ Cluster make_cluster(uint32_t n, uint32_t leader = 0) {
 
 // convenience wrappers
 bool wr(craft::craft_client& c, uint64_t off_blk, std::vector< uint8_t >& buf) {
-    return rg(c.write(blk(off_blk), buf.size(), one_iov(buf))).has_value();
+    return rg(c.write(nullptr, blk(off_blk), buf.size(), one_iov(buf))).has_value();
 }
 std::vector< uint8_t > rd(craft::craft_client& c, uint64_t off_blk, uint64_t nblk = 1) {
     std::vector< uint8_t > dest(nblk * PAGE, 0xEE);
-    auto r = rg(c.read(blk(off_blk), nblk * PAGE, one_iov(dest)));
+    auto r = rg(c.read(nullptr, blk(off_blk), nblk * PAGE, one_iov(dest)));
     EXPECT_TRUE(r.has_value());
     return dest;
 }
@@ -138,7 +138,7 @@ TEST(CraftClient, N1_CommitAdvancesOnAck) {
     ASSERT_TRUE(wr(*cl.client, 1, b1));
     EXPECT_EQ(cl.client->commit_lsn(), 1);
     EXPECT_EQ(cl.client->read_horizon(), 1);
-    EXPECT_TRUE(rg(cl.client->flush()).has_value());
+    EXPECT_TRUE(rg(cl.client->flush(nullptr)).has_value());
 }
 
 // Every IO response piggybacks the replica's {commit_lsn, last_append_lsn}, and the client feeds them to its
@@ -363,7 +363,7 @@ TEST(CraftClient, N3_StragglerWriteLandsIntactAfterTheClientReturned) {
     // Read it back straight off the straggler at the write's horizon; the bytes must be intact.
     auto& r = *cl.set.replicas[2];
     std::vector< uint8_t > dest(PAGE, 0xEE);
-    auto const out = rg(r.read(chdr(cl.client->term(), /*commit*/ 0), /*H*/ 0, blk(6), blk(1), one_iov(dest)));
+    auto const out = rg(r.read(nullptr, chdr(cl.client->term(), /*commit*/ 0), /*H*/ 0, blk(6), blk(1), one_iov(dest)));
     ASSERT_TRUE(out.has_value());
     EXPECT_FALSE(out->extents[0].hole);
     EXPECT_EQ(dest, page_of(0x5E)) << "payload survived; the replica copied it at issue, not after its sleep";
@@ -684,7 +684,7 @@ TEST(CraftClient, AllHoldersDownReturnsNotEligible) {
     cl.set.net->set_up(craft::mem_replica_id(cl.vid, 2), false);
 
     std::vector< uint8_t > dest(PAGE, 0xEE);
-    auto r = rg(cl.client->read(blk(5), PAGE, one_iov(dest)));
+    auto r = rg(cl.client->read(nullptr, blk(5), PAGE, one_iov(dest)));
     ASSERT_FALSE(r.has_value()) << "no reachable holder; must not serve stale data";
     EXPECT_TRUE(r.error() == make_error_condition(craft_error::NO_QUORUM) ||
                 r.error() == make_error_condition(craft_error::NOT_ELIGIBLE))
@@ -722,7 +722,7 @@ TEST(CraftClient, KeepAliveAdvancesReclaimFloor) {
     }
     // Writes advance the client frontier, but a member only applies up to the commit_lsn piggybacked on the
     // IO it saw; the broadcast keep_alive carries the latest frontier to everyone and reads back their commit.
-    ASSERT_TRUE(rg(cl.client->flush()).has_value());
+    ASSERT_TRUE(rg(cl.client->flush(nullptr)).has_value());
 
     int64_t const F = cl.client->commit_lsn();
     EXPECT_GT(cl.client->all_committed_lsn(), base);
@@ -746,7 +746,7 @@ TEST(CraftClient, ReclaimFloorPinnedByBehindMember) {
         ASSERT_TRUE(wr(*cl.client, b, v)); // dLSN b: 0,1 hold; member 2 misses it
     }
     cl.set.net->clear_faults();
-    ASSERT_TRUE(rg(cl.client->flush()).has_value());
+    ASSERT_TRUE(rg(cl.client->flush(nullptr)).has_value());
 
     int64_t const F = cl.client->commit_lsn();
     EXPECT_EQ(cl.set.replicas[0]->stats().commit_lsn, F);
@@ -774,7 +774,7 @@ TEST(CraftClient, LogoutClearsSessionThenReloginWorks) {
         EXPECT_EQ(cl.set.replicas[i]->stats().term, 0u) << "logout tore the session down on every replica";
     // Client side: it now considers itself disconnected, so IO fails fast (no term to fence with).
     auto v2 = page_of(0x5B);
-    EXPECT_FALSE(rg(cl.client->write(blk(7), v2.size(), one_iov(v2))).has_value());
+    EXPECT_FALSE(rg(cl.client->write(nullptr, blk(7), v2.size(), one_iov(v2))).has_value());
 
     // Re-login re-establishes a live session and IO works again.
     ASSERT_TRUE(rg(cl.client->login(TOKEN)).has_value());

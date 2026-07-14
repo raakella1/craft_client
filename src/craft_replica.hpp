@@ -41,7 +41,7 @@
 #include <craft/client.hpp> // client_handle (the opaque handle make_client returns)
 #include <craft/types.hpp>  // the CRAFT vocabulary + the result / async_result aliases
 
-struct io_uring; // liburing (fwd-decl only: the on-ring data-path seam is a pointer, see prepare_for_async)
+struct io_uring; // liburing (fwd-decl only: the on-ring data-path seam is the per-call `q` pointer, below)
 
 namespace craft {
 
@@ -50,6 +50,16 @@ public:
     virtual ~craft_replica() = default;
 
     // ── client-facing (what a CRAFT client issues against this one replica) ──
+    //
+    // THE ON-RING SEAM IS PER CALL: every mid-session verb (write/read/keep_alive/request_resolution) takes a
+    // leading `::io_uring* q` -- the caller's queue ring (a ublk hw queue's, or a test harness's), or null.
+    // Null q => the blocking tier (the transport's own completion source: the reference model's pool, the TCP
+    // proxy's session-mgr thread), callable from any thread. Non-null q => the verb submits its SQEs on `q` and
+    // its awaiter resumes on q's reap thread (freestanding tasks resume inline at completion). AFFINITY IS THE
+    // CALLER'S CONTRACT, exactly as with a raw io_uring: a given ring is passed only from its owner thread. A
+    // transport keeps one data connection per (ring, replica) -- the blk-mq grid -- created lazily at a ring's
+    // first verb, which by that contract happens on the ring's own thread; so per-connection state needs no
+    // locks. Transports that cannot submit on a caller ring ignore `q` and use their own completion source.
 
     // Login: run the session-establishment sequence. A follower returns LoginResult{term=0, leader_hint}
     // (not an error) so the client can redirect; craft_error::NO_QUORUM / REPLICA_DOWN are errors.
@@ -66,20 +76,20 @@ public:
     // frontier is advanced by hdr.commit_lsn (piggybacked commit). craft_error::STALE_TERM if
     // hdr.term != the session term. Returns the replica's {commit_lsn, last_append_lsn} after the append --
     // every IO response piggybacks the watermarks, so any round-trip refreshes the client's view.
-    virtual async_result< lsn_pair > write(client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
+    virtual async_result< lsn_pair > write(::io_uring* q, client_hdr hdr, int64_t dlsn, uint64_t addr, uint64_t len,
                                            sisl::sg_list data) = 0;
 
     // Latest version <= read_lsn (horizon H) for [addr, addr+len) (BYTE offset/length, aligned). Fills the
     // caller-owned `dest` buffer in place (scatter-gather; data sub-ranges get bytes, holes get zeros) and
     // returns the sparse layout (data vs holes) plus the piggybacked {commit_lsn, last_append_lsn}.
     // Advances the frontier to hdr.commit_lsn. STALE_TERM on term mismatch.
-    virtual async_result< read_result > read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
-                                             sisl::sg_list dest) = 0;
+    virtual async_result< read_result > read(::io_uring* q, client_hdr hdr, int64_t read_lsn, uint64_t addr,
+                                             uint64_t len, sisl::sg_list dest) = 0;
 
     // Advance the frontier toward hdr.commit_lsn + reset the client-liveness watchdog -- which is WHY
     // it is term-fenced: a stale client must not be able to keep the session alive. Returns the
     // achieved {commit_lsn, last_append_lsn}. No standalone commit verb; keep_alive is its carrier.
-    virtual async_result< lsn_pair > keep_alive(client_hdr hdr) = 0;
+    virtual async_result< lsn_pair > keep_alive(::io_uring* q, client_hdr hdr) = 0;
 
     // The client-requested resolution round (the design's client-request SyncRSCommitLSN trigger): resolve
     // every unresolved slot <= `upto` NOW -- fetch each from a holder, or, on quorum-lacks evidence, declare
@@ -93,21 +103,7 @@ public:
     // verdicted Empty, and a replica rejects a late arrival into an Empty slot -- so that write's own ack
     // path sees deterministic rejects and fails, the undefined-outcome contract for un-acked IO. Term-fenced
     // (STALE_TERM).
-    virtual async_result< resolution_result > request_resolution(client_hdr hdr, int64_t upto) = 0;
-
-    // Bind this backend's data path to a host io_uring `ring` (a ublk queue's, or a test's) for on-ring async
-    // completion. Called once per ring, OFF the IO path (never concurrently with an in-flight op). Default
-    // no-op: transports that don't submit on a caller-provided ring (the worker-thread TCP client, the
-    // in-process reference over its own pool) ignore it and keep their existing completion source. After this,
-    // every mid-session verb (write/read/keep_alive/request_resolution) submits its SQEs on `ring` and completes
-    // via sisl::async::cqe_state, which the ring owner's reap loop dispatches -- so many ops go in flight at
-    // once (QD>1) on the caller's thread.
-    //
-    // WHERE A VERB'S AWAITER RESUMES IS DECIDED HERE: the verbs return freestanding tasks (light_task) that
-    // resume their awaiter inline on the completing thread. Ring bound -> the ring owner's reap thread; not
-    // bound -> this backend's own completion thread (reference-model pool / session-mgr). A coroutine-native
-    // caller therefore treats binding a ring as part of the data-path contract, not a tuning knob.
-    virtual void prepare_for_async(::io_uring* /*ring*/) noexcept {}
+    virtual async_result< resolution_result > request_resolution(::io_uring* q, client_hdr hdr, int64_t upto) = 0;
 
     // This replica's endpoint id (for routing / membership).
     virtual peer_id_t id() const = 0;

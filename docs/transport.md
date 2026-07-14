@@ -50,6 +50,12 @@ Exactly one connection does `LOGIN` -- to the leader, establishing the set-wide 
 other connection in the grid does `HELO` to bind to it: `1 LOGIN + (nr_hw_queues x N - 1) HELO`, one `term`
 shared across the whole grid.
 
+The reference client realizes this with one small deviation: `LOGIN` rides a separate blocking admin socket
+(the session-mgr thread's `wire_client`, which login/logout keep for the session's whole life), and every data
+socket in the grid HELOs -- so on the wire it is `1 admin LOGIN + (nr_hw_queues x N) HELO'd data sockets`, the
+same single-LOGIN session bring-up with one extra (mostly idle) admin connection. Each data connection is
+opened lazily by its queue's first verb, on that queue's own ring.
+
 ## Connection lifecycle
 
 ```

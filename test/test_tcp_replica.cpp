@@ -69,17 +69,17 @@ TEST(CraftTcpReplica, LoginWriteReadLogout) {
         uint64_t const term = lr->term;
 
         auto data = page_of(0xAB);
-        ASSERT_TRUE(rg(proxy.write(chdr(term, /*commit=*/0), /*dlsn=*/0, /*addr=*/0, PAGE, one_iov(data))).has_value());
+        ASSERT_TRUE(rg(proxy.write(nullptr, chdr(term, /*commit=*/0), /*dlsn=*/0, /*addr=*/0, PAGE, one_iov(data))).has_value());
 
         std::vector< uint8_t > dst(PAGE, 0);
-        auto r = rg(proxy.read(chdr(term), /*read_lsn=*/0, /*addr=*/0, PAGE, one_iov(dst)));
+        auto r = rg(proxy.read(nullptr, chdr(term), /*read_lsn=*/0, /*addr=*/0, PAGE, one_iov(dst)));
         ASSERT_TRUE(r.has_value());
         ASSERT_EQ(r->extents.size(), 1u);
         EXPECT_FALSE(r->extents[0].hole);
         EXPECT_EQ(r->lsns.commit_lsn, 0); // the reply piggybacks the replica's watermarks
         EXPECT_EQ(dst, data);
 
-        auto ka = rg(proxy.keep_alive(chdr(term, /*commit=*/0)));
+        auto ka = rg(proxy.keep_alive(nullptr, chdr(term, /*commit=*/0)));
         ASSERT_TRUE(ka.has_value());
         EXPECT_EQ(ka->commit_lsn, 0);
 
@@ -105,10 +105,10 @@ TEST(CraftTcpReplica, FollowerLazyHelo) {
         CraftTcpReplica flw{"127.0.0.1", server.port(f), to_uuid(server.members()[f].id), vol};
 
         auto data = page_of(0xCD);
-        ASSERT_TRUE(rg(flw.write(chdr(term, 0), 0, 0, PAGE, one_iov(data))).has_value()); // HELOs, then writes
+        ASSERT_TRUE(rg(flw.write(nullptr, chdr(term, 0), 0, 0, PAGE, one_iov(data))).has_value()); // HELOs, then writes
 
         std::vector< uint8_t > dst(PAGE, 0);
-        auto r = rg(flw.read(chdr(term), 0, 0, PAGE, one_iov(dst)));
+        auto r = rg(flw.read(nullptr, chdr(term), 0, 0, PAGE, one_iov(dst)));
         ASSERT_TRUE(r.has_value());
         EXPECT_EQ(dst, data);
         EXPECT_GE(r->lsns.last_append_lsn, 0); // the follower's watermarks ride the read reply

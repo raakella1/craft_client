@@ -72,6 +72,7 @@ struct craft_cluster_server::impl {
     std::vector< std::thread > conns;
     std::mutex conns_mu;
     std::atomic< bool > stopping{false};
+    std::atomic< std::size_t > accepted{0}; // every client connection ever accepted (test observability)
 
     // The one server-wide session (all connections share it). Guarded by sess_mu; the IO path does not touch
     // it -- each connection captures the term at bind (LOGIN/HELO) into a stack local and stamps that, so a
@@ -153,6 +154,7 @@ struct craft_cluster_server::impl {
             auto c = listeners[idx].accept();
             if (stopping.load(std::memory_order_acquire)) return; // the poke, or a real stop -- drop it
             if (!c) continue;                                     // transient accept error while running
+            accepted.fetch_add(1, std::memory_order_relaxed);
             std::lock_guard< std::mutex > g{conns_mu};
             conns.emplace_back([this, cc = std::move(*c), idx]() mutable { serve(std::move(cc), idx); });
         }
@@ -429,6 +431,9 @@ void craft_cluster_server::set_replica_up(std::size_t idx, bool up) { p_->set_re
 void craft_cluster_server::force_subquorum(std::vector< std::size_t > keep) { p_->force_subquorum(std::move(keep)); }
 void craft_cluster_server::clear_faults() { p_->clear_faults(); }
 void craft_cluster_server::set_delay(std::size_t idx, std::chrono::milliseconds d) { p_->set_delay(idx, d); }
+std::size_t craft_cluster_server::connections_accepted() const {
+    return p_->accepted.load(std::memory_order_relaxed);
+}
 std::size_t craft_cluster_server::journal_slots(std::size_t idx) const { return p_->journal_slots(idx); }
 uint64_t craft_cluster_server::replica_term(std::size_t idx) const { return p_->replica_term(idx); }
 bool craft_cluster_server::read_replica(std::size_t idx, int64_t read_lsn, uint64_t addr, uint64_t len,
