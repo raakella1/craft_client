@@ -91,7 +91,8 @@ public:
     // data connection (craft_async_conn) is opened lazily on it at the first mid-session op and reconnected at
     // will. login/logout stay on the blocking session-mgr path (they bracket the ring's lifetime: login ran before any
     // ring existed, to yield lba/capacity/term); everything mid-session (write/read/keep_alive/resolve) moves
-    // onto the ring.
+    // onto the ring. Unprimed, a mid-session verb hops to the session-mgr thread and its awaiter RESUMES THERE
+    // (freestanding tasks resume inline at completion) -- see craft_replica::prepare_for_async for the contract.
     void prepare_for_async(::io_uring* ring) noexcept override { ring_ = ring; }
 
     peer_id_t id() const override { return id_; }

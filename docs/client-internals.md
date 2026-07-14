@@ -22,7 +22,7 @@ Design source: `HomeBlocks.wiki/CRAFT-Design.md`, sections *Write, Commit, Read,
 | `dlsn_tracker` | The whole state machine. Assigns dLSNs, tracks each slot's fate, derives the commit frontier and the read horizon. |
 | `sisl::StreamTracker<dlsn_slot>` | The spine, keyed by dLSN. Two `AtomicBitset`s (created / completed) over a flat slot array. Same primitive `home_log_store::m_records` uses. |
 | `resolution_gate` | A re-armable event. Only the pathological read paths ever wait on it. |
-| `when_quorum` | `sisl::async::when_quorum` (lives in sisl now, beside `when_all`). Fan-out that resumes at the quorum'th ack and leaves the stragglers running detached. Sibling of `sisl::async::when_all`; same `start_detached` + `value_awaitable` latch, different firing rule. |
+| `when_quorum` | `sisl::async::when_quorum` (lives in sisl now, beside `when_all`). Fan-out that resumes at the quorum'th ack and leaves the stragglers running detached. Sibling of `sisl::async::when_all`; same `value_awaitable` latch with each child launched via `light_task::detach()` (self-owning fire-and-forget), different firing rule. |
 | `craft_client` | Broadcast, quorum tally, login/redirect. Owns a `dlsn_tracker`. |
 | `MemTransport` (`../model/`) | The wire, and throwaway. Owns the payload, decides deliverability, injects latency and the deadline. Not a client concern, but the write path crosses it. |
 
@@ -422,7 +422,7 @@ anybody -- teaches the client nothing.
 
 | # | requirement | why the client needs it | who checks |
 |---|---|---|---|
-| 1 | A reply may arrive on **any** thread, never the issuer's | `sisl::async::task` resumes wherever the RPC completed. Nothing in the client may capture a shard key across a `co_await`. | the service pool |
+| 1 | A reply may arrive on **any** thread, never the issuer's | `sisl::async::light_task` resumes wherever the RPC completed (inline, no scheduler). Nothing in the client may capture a shard key across a `co_await`. | the service pool |
 | 2 | Replies to one broadcast arrive in **any order** | `when_quorum` resolves on the quorum'th ack, whichever peer that is; the rest keep running detached. | K > 1 service threads |
 | 3 | **One client, many caller threads** | ublk picks a queue by CPU, not by LBA, so every queue thread shares one partition's dLSN space. | `N3_ConcurrentWritersFromManyThreads` |
 | 4 | A peer that **times out may still have applied** the write | Counting it as a deterministic reject resolves the slot `Empty` and advances `F` past a dLSN a replica later applies. Divergence. | `ClearingADelayLeavesAMissingSlotThatDrains` |
@@ -469,8 +469,9 @@ replica -- which is precisely the seam a real transport will occupy.
 
 ## Concurrency notes
 
-* **Keyed on dLSN, never on thread.** `sisl::async::task` resumes on whatever thread completed the last
-  replica's RPC, so a shard key captured before a `co_await` is a data race after it.
+* **Keyed on dLSN, never on thread.** `sisl::async::light_task` resumes on whatever thread completed the last
+  replica's RPC (inline at completion -- there is no scheduler to hop back to), so a shard key captured before
+  a `co_await` is a data race after it.
 * **Stale reads only ever fence more.** dLSNs are dense, so every index in `(F, Ha]` was issued before
   `Ha` was published. A scanner may therefore walk that range and treat anything it cannot positively see
   as resolved *as* unresolved. A side index of in-flight ranges would not have this property -- it can be

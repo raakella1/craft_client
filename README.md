@@ -32,8 +32,11 @@ a byte range) and reads are sparse (data extents + holes; zeros never cross the 
 | **`craft_reference`** | An in-memory reference `craft_replica` + a loopback cluster server + a TCP server, so the client can be driven end-to-end with **no storage engine**. Reached publicly only through the in-process builder (`craft/local.hpp`). Test/dev-support. | craft_client |
 
 The result vocabulary itself (`result<T>` / `async_result<T>`) is owned by **sisl** (`sisl::result`,
-`sisl::async::result`) -- the same type HomeStore and nuraft_mesg use -- so a domain error (`craft_error`) rides
-the type-erased `std::error_condition` and no layer forks the vocabulary.
+`sisl::async::light_result` -- the freestanding, stdexec-free task) so a domain error (`craft_error`) rides the
+type-erased `std::error_condition` and no layer forks the vocabulary. The verbs are co_await-able from **any**
+coroutine (a ublk driver's `disk_task`, an `exec::task`, another `light_task`); the awaiting coroutine resumes
+on the thread that completes the op -- the ring's reap thread once `prepare_for_async` binds a ring, else a
+transport-internal thread. Blocking callers use `sisl::async::sync_get`.
 
 ## Public API surface
 
@@ -140,8 +143,9 @@ states, and conflating the last two is divergence (a timed-out write *may* have 
 | `craft_client` | Broadcast, quorum tally, login/redirect. Owns a `dlsn_tracker`; the opaque type behind `client_handle`. |
 | `net/` | The TCP transport: `craft_conn`, the wire-only `wire_client`, `CraftTcpReplica` (the `craft_replica` proxy), `craft_async_conn` (the on-ring data path -- every mid-session verb on the caller's io_uring), `craft_session_mgr` (the ONE process-wide admin thread; retires with the last proxy). |
 
-The generic pieces this leans on -- `sisl::result`/`async::result`, `sisl::async::when_quorum`, and the
-`sisl::async::sync_get`/`detach` coroutine bridges -- were hoisted **into sisl**, so nothing here forks them.
+The generic pieces this leans on -- `sisl::result`, the freestanding `sisl::async::light_task` (with its
+`.detach()` fire-and-forget mode and `sync_get` blocking bridge), and the `light_task` forms of
+`sisl::async::when_all`/`when_quorum` -- were hoisted **into sisl**, so nothing here forks them.
 
 ## Building
 

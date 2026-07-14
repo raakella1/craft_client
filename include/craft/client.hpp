@@ -53,6 +53,14 @@ client_handle make_client(std::vector< std::shared_ptr< craft_replica > > replic
                           uint32_t max_inflight = 128);
 
 // ── the driver surface (verbs over the handle) ──
+//
+// THREADING: every verb returns a freestanding task (see craft/types.hpp) -- co_await it from any coroutine,
+// and the awaiting coroutine RESUMES ON THE THREAD THAT COMPLETES THE OP. With a ring bound (prepare_for_async,
+// below) that is the ring owner's reap thread -- the single-threaded on-ring model a ublk queue wants. WITHOUT
+// a ring it is a transport-internal thread (the reference model's per-replica pool, the TCP proxy's shared
+// session-mgr thread): a coroutine-native caller off-ring must tolerate resuming there, or block instead via
+// sisl::async::sync_get, which is safe from any non-completing thread. There is no scheduler anywhere in this
+// stack to hop a consumer back to its own thread -- by design; do not assume one.
 
 // Establish the session, following NOT_LEADER redirects.
 async_status login(client_handle const& c, uint64_t client_token);
@@ -80,6 +88,10 @@ void drive_keepalives(client_handle const& c, std::size_t exclude_idx = k_no_leg
 // queue, or a test harness) calls this once after login, off the IO path; it fans out to each backend's
 // prepare_for_async, and transports that don't submit on a caller ring ignore it. UNCHANGED verbs: write/read
 // keep their signatures -- the client never learns the completion source moved onto the ring.
+//
+// For a coroutine-native consumer this is effectively PART OF THE DATA-PATH CONTRACT, not an optimization:
+// binding the ring is what makes the verbs' resumptions land on YOUR thread (see the threading note above).
+// Login runs before any ring exists and is unaffected -- drive it with sync_get on a setup thread.
 void prepare_for_async(client_handle const& c, ::io_uring* ring);
 
 uint32_t lba_size(client_handle const& c); // volume block size in bytes (alignment unit for addr/len)

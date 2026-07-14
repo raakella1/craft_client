@@ -26,7 +26,7 @@
 
 #include <gtest/gtest.h>
 
-#include <sisl/async/coro.hpp>
+#include <sisl/async/light_task.hpp> // sync_get(light_task)
 #include <dlsn_tracker.hpp>
 
 using namespace craft;

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0
+
+### Changed
+- **Task currency: `exec::task` -> `sisl::async::light_task`** (`async_result`/`async_status` aliases flipped in
+  `craft/types.hpp`). The verbs are now co_await-able from ANY coroutine -- a ublk driver's `disk_task` awaits
+  them directly, no shim/detach/rendezvous. THREADING CONTRACT (now explicit on the verbs and
+  `prepare_for_async`): the awaiting coroutine resumes on the thread that completes the op -- the bound ring's
+  reap thread after `prepare_for_async`, else a transport-internal thread (reference-model pool / session-mgr).
+  The old scheduler hop-back that `exec::task` could theoretically provide is gone; nothing used it (every site
+  suppressed it with `inline_scheduler`). Blocking callers keep `sisl::async::sync_get`. Fire-and-forget legs
+  (`fire_keepalive`/`fire_resolution`/`late_write`) launch via the explicit `.detach()` member.
+
 ## 0.1.1
 
 ### Added

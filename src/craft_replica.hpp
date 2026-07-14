@@ -102,6 +102,11 @@ public:
     // every mid-session verb (write/read/keep_alive/request_resolution) submits its SQEs on `ring` and completes
     // via sisl::async::cqe_state, which the ring owner's reap loop dispatches -- so many ops go in flight at
     // once (QD>1) on the caller's thread.
+    //
+    // WHERE A VERB'S AWAITER RESUMES IS DECIDED HERE: the verbs return freestanding tasks (light_task) that
+    // resume their awaiter inline on the completing thread. Ring bound -> the ring owner's reap thread; not
+    // bound -> this backend's own completion thread (reference-model pool / session-mgr). A coroutine-native
+    // caller therefore treats binding a ring as part of the data-path contract, not a tuning knob.
     virtual void prepare_for_async(::io_uring* /*ring*/) noexcept {}
 
     // This replica's endpoint id (for routing / membership).

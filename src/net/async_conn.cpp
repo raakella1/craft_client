@@ -102,7 +102,7 @@ void craft_async_conn::shutdown() noexcept {
 
 // ── on-ring primitives (each co_awaits a cqe_awaitable tied to its own SQE) ──
 
-sisl::async::task< int > craft_async_conn::ring_connect() {
+sisl::async::light_task< int > craft_async_conn::ring_connect() {
     fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd_ >= 0) { // see set_nodelay in conn.cpp: CRAFT is request/response, so Nagle only ever adds latency
         int const one = 1;
@@ -124,7 +124,7 @@ sisl::async::task< int > craft_async_conn::ring_connect() {
     co_return (res < 0) ? res : 0;
 }
 
-sisl::async::task< int > craft_async_conn::ring_send_all(std::span< uint8_t const > data) {
+sisl::async::light_task< int > craft_async_conn::ring_send_all(std::span< uint8_t const > data) {
     std::size_t off = 0;
     while (off < data.size()) {
         sisl::async::cqe_awaitable ev;
@@ -199,7 +199,7 @@ sisl::async::disk_task< int > craft_async_conn::run_pump() {
 
 // ── framed request/response over the pump ──
 
-sisl::async::task< std::expected< std::vector< uint8_t >, net_error > >
+sisl::async::light_task< std::expected< std::vector< uint8_t >, net_error > >
 craft_async_conn::round_trip(wire::op o, std::span< uint8_t const > op_hdr, std::span< uint8_t const > body) {
     uint16_t const rid = next_rid_++;
     if (next_rid_ == 0) next_rid_ = 1; // 0 is a fine correlator, but keep ids monotonic and non-zero
@@ -228,7 +228,7 @@ craft_async_conn::round_trip(wire::op o, std::span< uint8_t const > op_hdr, std:
 
 // ── lazy connect + HELO + arm the pump ──
 
-sisl::async::task< std::expected< void, net_error > >
+sisl::async::light_task< std::expected< void, net_error > >
 craft_async_conn::ensure_ready(std::array< uint8_t, 16 > const& vol, uint64_t token, uint64_t term) {
     if (ready_) co_return std::expected< void, net_error >{};
     if (connecting_) {
@@ -292,7 +292,7 @@ craft_async_conn::ensure_ready(std::array< uint8_t, 16 > const& vol, uint64_t to
 
 // ── IO ops ──
 
-sisl::async::task< std::expected< lsn_reply, net_error > >
+sisl::async::light_task< std::expected< lsn_reply, net_error > >
 craft_async_conn::write(int64_t dlsn, uint64_t addr, uint64_t len, std::span< uint8_t const > data, int64_t commit_lsn,
                         int64_t all_committed_lsn) {
     wire::write_req req{{commit_lsn, all_committed_lsn}, dlsn, addr, len};
@@ -305,8 +305,8 @@ craft_async_conn::write(int64_t dlsn, uint64_t addr, uint64_t len, std::span< ui
     co_return lsn_reply{static_cast< wire::status >(parsed->hdr.status), wr.commit_lsn, wr.last_append_lsn};
 }
 
-sisl::async::task< std::expected< lsn_reply, net_error > > craft_async_conn::keep_alive(int64_t commit_lsn,
-                                                                                        int64_t all_committed_lsn) {
+sisl::async::light_task< std::expected< lsn_reply, net_error > >
+craft_async_conn::keep_alive(int64_t commit_lsn, int64_t all_committed_lsn) {
     wire::keepalive_req req{{commit_lsn, all_committed_lsn}};
     auto reply = co_await round_trip(wire::op::keepalive, as_bytes(req), {});
     if (!reply) co_return std::unexpected(reply.error());
@@ -317,7 +317,7 @@ sisl::async::task< std::expected< lsn_reply, net_error > > craft_async_conn::kee
     co_return lsn_reply{static_cast< wire::status >(parsed->hdr.status), ka.commit_lsn, ka.last_append_lsn};
 }
 
-sisl::async::task< std::expected< read_reply, net_error > >
+sisl::async::light_task< std::expected< read_reply, net_error > >
 craft_async_conn::read(int64_t read_lsn, uint64_t addr, uint64_t len, std::span< uint8_t > dest, int64_t commit_lsn,
                        int64_t all_committed_lsn) {
     wire::read_req req{{commit_lsn, all_committed_lsn}, read_lsn, addr, len};
@@ -349,7 +349,7 @@ craft_async_conn::read(int64_t read_lsn, uint64_t addr, uint64_t len, std::span<
     co_return out;
 }
 
-sisl::async::task< std::expected< resolve_reply, net_error > >
+sisl::async::light_task< std::expected< resolve_reply, net_error > >
 craft_async_conn::resolve(int64_t upto, int64_t commit_lsn, int64_t all_committed_lsn) {
     wire::resolve_req req{{commit_lsn, all_committed_lsn}, upto};
     auto reply = co_await round_trip(wire::op::resolve, as_bytes(req), {});

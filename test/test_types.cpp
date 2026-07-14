@@ -20,9 +20,11 @@
 
 #include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases (all this suite needs)
 
-// The client-facing async aliases are exactly sisl's canonical result carrier (no fork).
-static_assert(std::is_same_v< craft::async_result< int >, sisl::async::result< int > >);
-static_assert(std::is_same_v< craft::async_status, sisl::async::status >);
+// The client-facing async aliases are exactly sisl's canonical FREESTANDING result carrier (no fork, and no
+// stdexec: light_task resumes its awaiter inline on the completing thread).
+static_assert(std::is_same_v< craft::async_result< int >, sisl::async::light_result< int > >);
+static_assert(std::is_same_v< craft::async_status, sisl::async::light_status >);
+static_assert(std::is_same_v< craft::async_result< int >, sisl::async::light_task< sisl::result< int > > >);
 
 TEST(CraftTypes, ErrorConditionRoundTrips) {
     std::error_condition const ec = craft::make_error_condition(craft::craft_error::STALE_TERM);

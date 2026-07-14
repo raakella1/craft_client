@@ -23,7 +23,6 @@
 
 #include <liburing.h>               // the on-ring data path: SQE prep / user_data
 #include <sisl/async/cqe_state.hpp> // sisl::async::cqe_awaitable + the managed-user_data contract the reap loop shares
-#include <sisl/async/coro.hpp>      // sisl::async::detach (the straggler's late-delivery leg)
 
 namespace craft {
 
@@ -121,7 +120,7 @@ async_result< lsn_pair > MemCraftReplica::write(client_hdr hdr, int64_t dlsn, ui
     auto const op_to = net_->op_timeout();
     auto const delay = rf->delay;
     if (delay.count() > 0 && op_to.count() > 0 && delay >= op_to) {
-        sisl::async::detach(late_write(hdr, dlsn, addr, len, std::move(bytes), delay));
+        late_write(hdr, dlsn, addr, len, std::move(bytes), delay).detach();
         co_await ring_delay(op_to);
         co_return std::unexpected(std::make_error_condition(std::errc::timed_out));
     }

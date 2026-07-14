@@ -22,8 +22,6 @@
 #include <sisl/async/when_quorum.hpp>
 #include <sisl/fds/buffer.hpp> // sisl::sg_iterator
 
-#include <sisl/async/coro.hpp> // sisl::async::detach
-
 #include "client_impl.hpp" // the concrete craft_client (internal)
 
 namespace craft {
@@ -213,8 +211,7 @@ void craft_client::request_resolution_round(int64_t upto) {
     // per peer (the keep_alive collapse); whichever member IS the leader runs the round, the rest answer
     // NOT_LEADER (a real replica may instead forward to its leader -- either way the client need not know).
     for (std::size_t m = 0; m < replicas_.size(); ++m) {
-        if (route_->try_begin_resolution(m))
-            sisl::async::detach(fire_resolution(replicas_[m], m, term_, tracker_, route_));
+        if (route_->try_begin_resolution(m)) fire_resolution(replicas_[m], m, term_, tracker_, route_).detach();
     }
 }
 
@@ -244,7 +241,9 @@ async_result< lsn_pair > craft_client::issue_plan(std::shared_ptr< craft_replica
         futs.push_back(target->read(hdr, seg.H, seg.addr, seg.len, std::move(sub)));
     }
     lsn_pair lsns{-1, -1};
-    for (auto const& r : co_await sisl::async::when_all(std::move(futs))) {
+    // co_await hoisted out of the range-for initializer: GCC 16.1 ICEs (get_callee_fndecl) on the combined form.
+    auto const results = co_await sisl::async::when_all(std::move(futs));
+    for (auto const& r : results) {
         if (!r.has_value()) co_return std::unexpected(r.error());
         lsns.commit_lsn = std::max(lsns.commit_lsn, r->lsns.commit_lsn);
         lsns.last_append_lsn = std::max(lsns.last_append_lsn, r->lsns.last_append_lsn);
@@ -327,7 +326,7 @@ void craft_client::drive_keepalives(std::size_t exclude_idx) {
         if (m == exclude_idx) continue;
         // One outstanding keep_alive per leg is the whole collapse: a busy read stream tops a leg up again only
         // once its previous keep_alive has completed, never one-per-read.
-        if (route_->try_begin_keepalive(m)) sisl::async::detach(fire_keepalive(replicas_[m], hdr, route_, m));
+        if (route_->try_begin_keepalive(m)) fire_keepalive(replicas_[m], hdr, route_, m).detach();
     }
 }
 

@@ -31,8 +31,8 @@
 
 #include <gtest/gtest.h>
 
-#include <sisl/async/cqe_state.hpp> // is_managed / decode_managed_user_data + complete_cqe_state (the reap contract)
-#include <sisl/async/coro.hpp>      // sisl::async::detach
+#include <sisl/async/cqe_state.hpp>  // is_managed / decode_managed_user_data + complete_cqe_state (the reap contract)
+#include <sisl/async/light_task.hpp> // .detach() on the issue_* legs
 
 #include <craft/client.hpp>  // client_handle + verbs + prepare_for_async
 #include "net/tcp_set.hpp"   // make_tcp_replica_set (a real cluster server + CraftTcpReplica proxies)
@@ -158,7 +158,7 @@ TEST(CraftAsyncTcp, DepthWriteReadRoundTripOverTcp) {
     auto wdone = std::make_shared< std::atomic< int > >(0);
     auto wok = std::make_shared< std::atomic< int > >(0);
     for (int i = 0; i < N; ++i) {
-        sisl::async::detach(issue_write(client, blk(i), PAGE, one_iov(wbuf[i]), wdone, wok));
+        issue_write(client, blk(i), PAGE, one_iov(wbuf[i]), wdone, wok).detach();
     }
 
     // DEPTH PROOF (before any reap): every write is suspended lazily connecting/HELO'ing/sending on the ring, so N
@@ -179,7 +179,7 @@ TEST(CraftAsyncTcp, DepthWriteReadRoundTripOverTcp) {
     auto rdone = std::make_shared< std::atomic< int > >(0);
     auto rok = std::make_shared< std::atomic< int > >(0);
     for (int i = 0; i < N; ++i) {
-        sisl::async::detach(issue_read(client, blk(i), PAGE, one_iov(rbuf[i]), rdone, rok));
+        issue_read(client, blk(i), PAGE, one_iov(rbuf[i]), rdone, rok).detach();
     }
     ASSERT_TRUE(driver.drive_until([&] { return rdone->load() == N; })) << "every read must resolve over the ring";
     EXPECT_EQ(rok->load(), N) << "all N reads succeeded";
@@ -215,14 +215,14 @@ TEST(CraftAsyncTcp, ResolveOverRing) {
     auto d2 = page_of(0xA2);
     auto wdone = std::make_shared< std::atomic< int > >(0);
     auto wok = std::make_shared< std::atomic< int > >(0);
-    sisl::async::detach(issue_proxy_write(&leader, chdr(term), /*dlsn=*/0, blk(0), PAGE, one_iov(d0), wdone, wok));
-    sisl::async::detach(issue_proxy_write(&leader, chdr(term), /*dlsn=*/2, blk(2), PAGE, one_iov(d2), wdone, wok));
+    issue_proxy_write(&leader, chdr(term), /*dlsn=*/0, blk(0), PAGE, one_iov(d0), wdone, wok).detach();
+    issue_proxy_write(&leader, chdr(term), /*dlsn=*/2, blk(2), PAGE, one_iov(d2), wdone, wok).detach();
     ASSERT_TRUE(driver.drive_until([&] { return wdone->load() == 2; })) << "both writes must land over the ring";
     ASSERT_EQ(wok->load(), 2);
 
     auto out = std::make_shared< std::optional< result< resolution_result > > >();
     auto rdone = std::make_shared< std::atomic< int > >(0);
-    sisl::async::detach(issue_resolution(&leader, chdr(term), /*upto=*/2, out, rdone));
+    issue_resolution(&leader, chdr(term), /*upto=*/2, out, rdone).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds{25});
     EXPECT_EQ(rdone->load(), 0) << "resolve must park on the ring, not complete on the worker";
 

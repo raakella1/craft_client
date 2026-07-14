@@ -153,10 +153,11 @@ public:
 
     // On-ring data path: bind write/read/keep_alive to `ring` so their delivery timer is a ring SQE the ring
     // owner's reap loop completes (many legs in flight at once, QD>1, on the caller's thread) instead of a
-    // MemTransport pool hop. A null ring (the default) keeps the existing pool path. The CALLER owns the reap
-    // loop: after this, it MUST drain the ring's CQEs (dispatch each managed one via
-    // sisl::async::complete_cqe_state) -- including the detached straggler legs -- or the submitted SQEs never
-    // fire and the ops hang. See craft_replica::prepare_for_async.
+    // MemTransport pool hop. A null ring (the default) keeps the existing pool path -- where a verb's awaiter
+    // RESUMES ON THE REPLICA'S POOL THREAD (the freestanding tasks resume inline at completion; see
+    // craft_replica::prepare_for_async). The CALLER owns the reap loop: after this, it MUST drain the ring's
+    // CQEs (dispatch each managed one via sisl::async::complete_cqe_state) -- including the detached straggler
+    // legs -- or the submitted SQEs never fire and the ops hang.
     void prepare_for_async(::io_uring* ring) noexcept override;
 
     // ── craft_peer: the PEER plane (a holder answering another replica, never a client) ──

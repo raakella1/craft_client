@@ -35,8 +35,8 @@
 #include <boost/uuid/uuid_generators.hpp> // random volume id
 #include <gtest/gtest.h>
 
-#include <sisl/async/cqe_state.hpp> // is_managed / decode_managed_user_data + complete_cqe_state (the reap contract)
-#include <sisl/async/coro.hpp>      // sisl::async::detach
+#include <sisl/async/cqe_state.hpp>  // is_managed / decode_managed_user_data + complete_cqe_state (the reap contract)
+#include <sisl/async/light_task.hpp> // .detach() on the issue_* legs
 
 #include <craft/client.hpp>  // client_handle + verbs + prepare_for_async
 #include "craft_replica.hpp" // make_client
@@ -165,7 +165,7 @@ TEST(CraftAsyncMem, DepthAtOnceQuorumWithoutStragglerThenStragglerDrainsOnRing) 
     auto wdone = std::make_shared< std::atomic< int > >(0);
     auto wok = std::make_shared< std::atomic< int > >(0);
     for (int i = 0; i < N; ++i) {
-        sisl::async::detach(issue_write(client, blk(i), PAGE, one_iov(wbuf[i]), wdone, wok));
+        issue_write(client, blk(i), PAGE, one_iov(wbuf[i]), wdone, wok).detach();
     }
 
     // DEPTH PROOF (before any reap): every leg is suspended on its ring timer, so N dLSNs are handed out and NONE
@@ -194,7 +194,7 @@ TEST(CraftAsyncMem, DepthAtOnceQuorumWithoutStragglerThenStragglerDrainsOnRing) 
     // ── settle the read horizon (flush = keep_alive broadcast, also on the ring), then read every block back and
     //    verify its bytes: the READ path is on the ring too, and the data is what we wrote. ──
     auto flushed = std::make_shared< std::atomic< bool > >(false);
-    sisl::async::detach(issue_flush(client, flushed));
+    issue_flush(client, flushed).detach();
     ASSERT_TRUE(driver.drive_until([&] { return flushed->load(); }));
     EXPECT_GE(craft::read_horizon(client), int64_t{N - 1}) << "the horizon covers every committed write";
 
@@ -202,7 +202,7 @@ TEST(CraftAsyncMem, DepthAtOnceQuorumWithoutStragglerThenStragglerDrainsOnRing) 
     auto rdone = std::make_shared< std::atomic< int > >(0);
     auto rok = std::make_shared< std::atomic< int > >(0);
     for (int i = 0; i < N; ++i) {
-        sisl::async::detach(issue_read(client, blk(i), PAGE, one_iov(rbuf[i]), rdone, rok));
+        issue_read(client, blk(i), PAGE, one_iov(rbuf[i]), rdone, rok).detach();
     }
     ASSERT_TRUE(driver.drive_until([&] { return rdone->load() == N; })) << "every read must resolve over the ring";
     EXPECT_EQ(rok->load(), N) << "all N reads succeeded";

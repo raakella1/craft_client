@@ -42,7 +42,7 @@
 
 #include <sisl/async/cqe_state.hpp> // cqe_awaitable (send/connect/recv completions) + the managed-user_data contract
 #include <sisl/async/disk_task.hpp> // disk_task<T>: the stand-alone service-loop handle (steal _coro / destroy), as ublkpp's queue_service
-#include <sisl/async/task.hpp> // sisl::async::task<T> == exec::task<T>
+#include <sisl/async/light_task.hpp> // sisl::async::light_task<T>: freestanding, resumes on the completing thread
 
 #include <craft/net/conn.hpp>  // net_error
 #include "net/wire_client.hpp" // lsn_reply / read_reply
@@ -64,23 +64,25 @@ public:
     // Lazy connect + HELO(vol, token, term) + arm the recv pump, on the ring. Idempotent while ready; after a
     // fault the fd was dropped, so this reconnects. A follower/leader distinction is irrelevant here -- HELO
     // binds this data fd to the already-established session by term.
-    sisl::async::task< std::expected< void, net_error > > ensure_ready(std::array< uint8_t, 16 > const& vol,
-                                                                       uint64_t token, uint64_t term);
+    sisl::async::light_task< std::expected< void, net_error > > ensure_ready(std::array< uint8_t, 16 > const& vol,
+                                                                             uint64_t token, uint64_t term);
 
     // ── IO (async, on the ring; many may be in flight, demuxed by request_id) ──
-    sisl::async::task< std::expected< lsn_reply, net_error > > write(int64_t dlsn, uint64_t addr, uint64_t len,
-                                                                     std::span< uint8_t const > data,
-                                                                     int64_t commit_lsn, int64_t all_committed_lsn);
-    sisl::async::task< std::expected< read_reply, net_error > > read(int64_t read_lsn, uint64_t addr, uint64_t len,
-                                                                     std::span< uint8_t > dest, int64_t commit_lsn,
-                                                                     int64_t all_committed_lsn);
-    sisl::async::task< std::expected< lsn_reply, net_error > > keep_alive(int64_t commit_lsn,
-                                                                          int64_t all_committed_lsn);
+    sisl::async::light_task< std::expected< lsn_reply, net_error > > write(int64_t dlsn, uint64_t addr, uint64_t len,
+                                                                           std::span< uint8_t const > data,
+                                                                           int64_t commit_lsn,
+                                                                           int64_t all_committed_lsn);
+    sisl::async::light_task< std::expected< read_reply, net_error > > read(int64_t read_lsn, uint64_t addr,
+                                                                           uint64_t len, std::span< uint8_t > dest,
+                                                                           int64_t commit_lsn,
+                                                                           int64_t all_committed_lsn);
+    sisl::async::light_task< std::expected< lsn_reply, net_error > > keep_alive(int64_t commit_lsn,
+                                                                                int64_t all_committed_lsn);
     // The client-requested resolution round, on the data connection like every mid-session verb. The round is
     // slow leader work (fetch-from-holder), but replies demux by request_id, so the parked leg costs the data
     // ops in flight nothing.
-    sisl::async::task< std::expected< resolve_reply, net_error > > resolve(int64_t upto, int64_t commit_lsn,
-                                                                           int64_t all_committed_lsn);
+    sisl::async::light_task< std::expected< resolve_reply, net_error > > resolve(int64_t upto, int64_t commit_lsn,
+                                                                                 int64_t all_committed_lsn);
 
     bool ready() const noexcept { return ready_; }
 
@@ -135,13 +137,13 @@ private:
 
     // Frame `op_hdr` + `body` as `o` at a fresh request_id, send it on the ring, and await the reply via the
     // pump. Returns the raw reply message bytes (the caller decodes the typed rsp), or a net_error.
-    sisl::async::task< std::expected< std::vector< uint8_t >, net_error > >
+    sisl::async::light_task< std::expected< std::vector< uint8_t >, net_error > >
     round_trip(wire::op o, std::span< uint8_t const > op_hdr, std::span< uint8_t const > body);
 
     // socket() + async IORING_OP_CONNECT on the ring; sets fd_. Returns 0 on success, <0 (-errno) on failure.
-    sisl::async::task< int > ring_connect();
+    sisl::async::light_task< int > ring_connect();
     // Send all of `data`, looping over partial sends via IORING_OP_SEND on the ring. 0 ok, <0 on error.
-    sisl::async::task< int > ring_send_all(std::span< uint8_t const > data);
+    sisl::async::light_task< int > ring_send_all(std::span< uint8_t const > data);
     // The persistent recv pump: one IORING_OP_RECV at a time; parse every complete message out of rx_ and demux
     // it by request_id to the waiting reply_slot. Re-arms until shutdown / a recv fault fails all pending. A
     // stand-alone disk_task (like ublkpp's queue_service): we steal its _coro, resume once, and destroy at

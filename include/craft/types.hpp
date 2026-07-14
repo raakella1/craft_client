@@ -27,10 +27,10 @@
 #include <system_error>
 #include <vector>
 
-#include <boost/uuid/uuid.hpp>   // boost::uuids::uuid (== peer_id_t)
-#include <sisl/async/result.hpp> // sisl::async::result / ::status (the co_await-able result carrier)
-#include <sisl/result.hpp>       // sisl::result / ::status / ::ok
-#include <sisl/utility/enum.hpp> // ENUM
+#include <boost/uuid/uuid.hpp>       // boost::uuids::uuid (== peer_id_t)
+#include <sisl/async/light_task.hpp> // sisl::async::light_result / ::light_status (the co_await-able result carrier)
+#include <sisl/result.hpp>           // sisl::result / ::status / ::ok
+#include <sisl/utility/enum.hpp>     // ENUM
 
 namespace craft {
 
@@ -44,9 +44,17 @@ using result = sisl::result< T >;
 using status = sisl::status;
 using sisl::ok;
 
+// The FREESTANDING task (sisl::async::light_task): a plain awaitable co_await-able from any coroutine --
+// another light_task, a ublk driver's disk_task, an exec::task -- with no scheduler anywhere. THE THREADING
+// CONTRACT IS THE COMPLETION'S: the awaiting coroutine resumes on whatever thread completes the op -- the
+// ring owner's reap thread once prepare_for_async has bound a ring, else a transport-internal thread (the
+// reference model's replica pool, the TCP proxy's session-mgr thread). A coroutine-native consumer must
+// bind a ring or tolerate foreign-thread resumption; a blocking consumer (sisl::async::sync_get) is safe
+// either way. (The previous exec::task currency could hop an async consumer back to its own scheduler;
+// nothing in this stack used that, and the on-ring data path is built on NOT doing it.)
 template < typename T >
-using async_result = sisl::async::result< T >;
-using async_status = sisl::async::status;
+using async_result = sisl::async::light_result< T >;
+using async_status = sisl::async::light_status;
 
 // A replica's endpoint id (routing / membership). A 16-byte uuid; identical to any consumer's own uuid alias.
 using peer_id_t = boost::uuids::uuid;
