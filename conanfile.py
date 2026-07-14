@@ -42,7 +42,7 @@ class CraftClientConan(ConanFile):
         # craft_wire is a std-only leaf and needs nothing. craft_types / craft_client (added as they land) pull
         # sisl (result / async::result / sg_list) and liburing (the io_uring transport); declared here so the
         # package graph is right from the start.
-        self.requires("sisl/[^14.7]@oss/dev", transitive_headers=True)
+        self.requires("sisl/[^14.8]@oss/dev", transitive_headers=True)
         self.requires("liburing/[^2.4]", transitive_headers=True)
 
     def validate(self):
