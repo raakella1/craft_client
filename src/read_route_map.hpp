@@ -63,8 +63,8 @@
 //
 // RECLAIM FLOOR. `synced_` doubles as the client's model of each member's commit_lsn, so `all_committed_` --
 // the min across members, stamped into `client_hdr.all_committed_lsn` -- is the set-wide journal reclaim
-// floor. A member we have not heard a commit_lsn from (down, or pre-keep_alive) holds it at the login
-// baseline, correctly pinning the floor down until that member reports progress.
+// floor. A member we have not heard a commit_lsn from (down, or pre-report) holds it at the unsynced floor,
+// correctly pinning the floor down until that member reports progress.
 
 #include <algorithm>
 #include <array>
@@ -114,9 +114,12 @@ class read_route_map {
     using missing_map = boost::icl::interval_map< uint64_t, int64_t, boost::icl::partial_enricher >;
 
 public:
-    // (Re-)seed for a session of `n` members with login dLSN `L`. The login SyncRSCommitLSN barrier synced
-    // the live members at L, so everything <= L is universally held: no member is missing anything, the
-    // overlay starts at L+1, and each member's Synced baseline is L. n must be in [1, 64] (bitset).
+    // (Re-)seed for a session of `n` members with login dLSN `L` (the frontier; the overlay starts at L+1). The
+    // login barrier does NOT make everything <= L universally held -- it guarantees only quorum durability +
+    // leader completeness, so a live member may still hold a hole <= L. Each member's Synced baseline therefore
+    // starts at the UNSYNCED FLOOR (ineligible for reads); the caller raises it per-member from each member's real
+    // commit_lsn (login reply, then IO / keep_alive replies). A member is trusted for reads only once Synced >= L,
+    // so a laggard is routed AROUND until it resyncs. n must be in [1, 64] (bitset).
     void reset(std::size_t n, int64_t login_dlsn) {
         assert(n >= 1 && n <= k_max_members); // real CRAFT replica sets are 3/5/7/9
         n_ = n;
@@ -129,11 +132,11 @@ public:
                 miss_[i].clear();
         }
         for (std::size_t i = 0; i < n; ++i) {
-            synced_[i].store(login_dlsn, std::memory_order_relaxed);
+            synced_[i].store(k_unsynced, std::memory_order_relaxed); // raised per-member from its real commit_lsn
             ka_inflight_[i].store(false, std::memory_order_relaxed);
             rr_inflight_[i].store(false, std::memory_order_relaxed);
         }
-        all_committed_.store(login_dlsn, std::memory_order_relaxed); // min synced_ == login baseline
+        all_committed_.store(k_unsynced, std::memory_order_relaxed); // min synced_; rises as members report in
         {
             std::lock_guard< std::mutex > g{pending_mu_};
             pending_.clear();
@@ -237,7 +240,8 @@ public:
     }
 
     // Is member `idx` eligible to serve a read of [addr,len) whose highest segment horizon is `Hmax`?
-    //   (a) Synced >= L    -- filled to the login baseline (vacuous until recovery advances synced_);
+    //   (a) Synced >= L    -- the member has PROVEN (login / keep_alive / IO replies) it holds the committed
+    //                         prefix up to the login frontier; a laggard seeded at the floor is excluded here;
     //   (b) below the frontier: no Missing byte-range overlapping [addr,len) (per-block precise); and
     //   (c) above the frontier: it holds every DURABLE overlay slot in (folded, Hmax] overlapping the range.
     // A slot with fewer than `quorum` holders is a sub-quorum / failed write, never a winner, so skipped in
@@ -345,6 +349,10 @@ public:
 private:
     static constexpr int64_t kNever = std::numeric_limits< int64_t >::max();
     static constexpr int64_t k_trunc_batch = 512;
+    // Synced baseline a member starts a session at, before it has proven its commit_lsn. Below any real login
+    // dLSN L (commit_lsn floors at -1), so eligible()'s check (a) excludes the member until a login/keep_alive/IO
+    // reply raises it -- a live laggard is NOT trusted just because login picked L.
+    static constexpr int64_t k_unsynced = -1;
 
     static uint64_t bit(std::size_t i) { return uint64_t{1} << i; }
     static uint64_t mask_of(std::size_t n) { return (n >= 64) ? ~uint64_t{0} : ((uint64_t{1} << n) - 1); }

@@ -303,9 +303,9 @@ void run_tcp_queue(client_handle client, int qi, int writes, std::barrier<>& sta
 
 // The nr_hw_queues x N connection GRID over real sockets: Q queue threads, each with its own ring, drive one
 // shared client against a 3-server cluster. Beyond the data integrity the mem twin proves, the server-side
-// accept count witnesses the grid itself: one data connection per (queue, replica) -- Q x 3 -- plus the single
-// blocking admin socket that carried LOGIN. (transport.md's "1 LOGIN + grid-1 HELO" counts sessions idealized
-// onto data sockets; in this client LOGIN rides its own admin conn, hence grid + 1.)
+// accept count witnesses it: one data connection per (queue, replica) -- Q x 3 -- plus one admin/session socket
+// per replica. Admission logs in on one member and HELO-probes all three (each returns its commit_lsn for the
+// read-eligibility gate), so all three session sockets stand up before any queue IO -- hence Q x 3 + 3.
 TEST(CraftAsyncTcp, MultiQueueGridOverTcp) {
     constexpr int Q = 3; // queues (threads x rings)
     constexpr int N = 6; // writes per queue
@@ -314,7 +314,7 @@ TEST(CraftAsyncTcp, MultiQueueGridOverTcp) {
     auto set = craft::make_tcp_replica_set(/*n=*/3, PAGE, k_capacity, wire::k_default_max_tx);
     std::vector< std::shared_ptr< craft_replica > > backends(set.replicas.begin(), set.replicas.end());
     auto client = craft::make_client(backends);
-    ASSERT_TRUE(rg(craft::login(client, TOKEN)).has_value()); // 1 admin socket (leader), before any queue IO
+    ASSERT_TRUE(rg(craft::login(client, TOKEN)).has_value()); // 3 session sockets (login + HELO-probe all), pre-IO
 
     std::barrier<> start{Q};
     std::atomic< int > failures{0};
@@ -332,6 +332,7 @@ TEST(CraftAsyncTcp, MultiQueueGridOverTcp) {
     // transient reconnect (on_net_fault poisons a conn; the next op redials) and a leader at index 0 (no
     // NOT_LEADER redirect opening a second admin socket); both hold on a healthy loopback set. If this ever
     // flakes in CI, a reconnect happened -- investigate before loosening.
-    EXPECT_EQ(set.server->connections_accepted(), std::size_t{Q * 3 + 1})
-        << "the grid: one data socket per (queue, replica), plus the one admin LOGIN socket";
+    EXPECT_EQ(set.server->connections_accepted(), std::size_t{Q * 3 + 3})
+        << "one data socket per (queue, replica), plus one admin/session socket per replica (admission logs in "
+           "on one and HELO-probes all three)";
 }

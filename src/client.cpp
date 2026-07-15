@@ -15,6 +15,7 @@
 #include <craft/client.hpp>  // the opaque handle + the free-function declarations
 #include "craft_replica.hpp" // make_client
 
+#include <chrono>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,12 @@ using result = sisl::result< T >;
 // frontier -- which is the WRITE path. read() still folds exactly (fold_to(F), unbatched), so a read never sees
 // a stale horizon; this only bounds what a write leaves behind for it.
 constexpr int64_t k_fold_batch = 512;
+
+// Admission deadline. After the session is established the client HELOs every member (a ringless keep_alive,
+// which stands the session leg up and returns that member's commit_lsn) and admits for I/O only once a quorum
+// has acked AND at least one member holds data through the login frontier L. A member below L may resync into
+// range, so the client re-probes until this deadline, then fails admission -- it never opens I/O it cannot serve.
+constexpr auto k_admit_timeout = std::chrono::seconds{5};
 
 void craft_client::maybe_fold() {
     int64_t const F = tracker_->frontier();
@@ -82,14 +89,43 @@ async_status craft_client::login(uint64_t client_token) {
         // margin over max_tx), so the payload stays the clean number.
         max_tx_ = lr->max_tx;
         tracker_->reset_at(lr->dLSN, lr->lba_size);
-        // Seed the router for this session: everything <= the login dLSN is universally held (the login
-        // SyncRSCommitLSN barrier). Install a FRESH map rather than resetting in place: a detached straggler
-        // from a prior session still holds a shared_ptr to the old map (the when_quorum hook captured a copy)
-        // and may run record_completion after we return here -- reconstructing the live map under it would
-        // race. The old map is orphaned and freed once its last straggler finishes.
+        // Install a FRESH router for this session (do NOT reset in place): a detached straggler from a prior
+        // session still holds a shared_ptr to the old map (the when_quorum hook captured a copy) and may run
+        // record_completion after we return -- reconstructing the live map under it would race. The old map is
+        // orphaned and freed once its last straggler finishes.
         route_ = std::make_shared< read_route_map >();
         route_->reset(replicas_.size(), lr->dLSN);
-        co_return ok();
+        // Establish + probe every member and admit for I/O only once the cluster can actually serve it. There is
+        // NO data-path leader: login may have been brokered by any member (a follower forwards to the RAFT leader
+        // and answers), and the RAFT leader may be a skinny consensus node holding no data -- so no member is
+        // trusted on faith. A ringless keep_alive HELOs the member's session leg and returns its own commit_lsn;
+        // we seed that member's read-eligibility baseline (Synced) from it. Admit once a QUORUM has acked AND at
+        // least one member holds data through the login frontier L (commit_lsn >= L), so every committed read is
+        // servable. A member below L may resync into range, so re-probe until the admit deadline, then fail --
+        // never open I/O we cannot serve. reset() seeded the floor; a member proves itself here or stays out.
+        int64_t const L = lr->dLSN;
+        auto const admit_deadline = std::chrono::steady_clock::now() + k_admit_timeout;
+        for (;;) {
+            client_hdr const probe_hdr = make_hdr();
+            std::vector< async_result< lsn_pair > > probes;
+            probes.reserve(replicas_.size());
+            for (auto& h : replicas_)
+                probes.push_back(h->keep_alive(nullptr, probe_hdr));
+            auto const acks = co_await sisl::async::when_all(std::move(probes));
+            std::size_t acked = 0;
+            bool holder_at_L = false;
+            for (std::size_t i = 0; i < replicas_.size(); ++i) {
+                if (!acks[i].has_value()) continue;
+                ++acked;
+                route_->advance_synced(i, acks[i]->commit_lsn);
+                if (acks[i]->commit_lsn >= L) holder_at_L = true;
+            }
+            if (acked >= quorum() && holder_at_L) co_return ok(); // quorum established + L is servable -> admit
+            if (std::chrono::steady_clock::now() >= admit_deadline)
+                co_return std::unexpected(make_error_condition(craft_error::NO_QUORUM));
+            // else: sub-quorum, or nobody holds L yet. Re-probe -- the round-trip paces the retry, and a member
+            // below L may resync into range before the deadline.
+        }
     }
     co_return std::unexpected(last_err ? last_err : make_error_condition(craft_error::NOT_LEADER));
 }
