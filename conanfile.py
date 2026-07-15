@@ -21,11 +21,13 @@ class CraftClientConan(ConanFile):
     options = {
         "shared": [True, False],
         "fPIC": [True, False],
+        "coverage": ['True', 'False'],
         "sanitize": ["address", "thread", "False"],
     }
     default_options = {
         "shared": False,
         "fPIC": True,
+        "coverage": False,
         "sanitize": "False",
     }
 
@@ -34,6 +36,14 @@ class CraftClientConan(ConanFile):
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
+
+    def config_options(self):
+        if self.settings.build_type == "Debug":
+            if self.options.coverage and self.options.sanitize:
+                raise ConanInvalidConfiguration("Sanitizer does not work with Code Coverage!")
+            if self.conf.get("tools.build:skip_test", default=False):
+                if self.options.coverage or self.options.sanitize:
+                    raise ConanInvalidConfiguration("Coverage/Sanitizer requires Testing!")
 
     def build_requirements(self):
         self.test_requires("gtest/[^1.17]")
@@ -53,6 +63,8 @@ class CraftClientConan(ConanFile):
         self.folders.source = "."
         if self.options.get_safe("sanitize") and self.options.sanitize != "False":
             self.folders.build = join("build", f"Sanitized-{self.options.sanitize}")
+        elif self.options.get_safe("coverage"):
+            self.folders.build = join("build", "Coverage")
         else:
             self.folders.build = join("build", str(self.settings.build_type))
         self.folders.generators = join(self.folders.build, "generators")
@@ -74,10 +86,16 @@ class CraftClientConan(ConanFile):
         tc = CMakeToolchain(self)
         tc.variables["CMAKE_EXPORT_COMPILE_COMMANDS"] = "ON"
         tc.variables["CTEST_OUTPUT_ON_FAILURE"] = "ON"
-        if self.options.get_safe("sanitize") == "thread":
-            tc.variables["THREAD_SANITIZER_ON"] = "ON"
-        elif self.options.get_safe("sanitize") == "address":
-            tc.variables["ADDRESS_SANITIZER_ON"] = "ON"
+        if self.settings.build_type == "Debug":
+            if self.options.get_safe("coverage"):
+                tc.variables['BUILD_COVERAGE'] = 'ON'
+            elif self.options.get_safe("sanitize") and self.options.sanitize != "False":
+                if self.options.sanitize == "thread":
+                    tc.variables['THREAD_SANITIZER_ON'] = 'ON'
+                else:  # address
+                    tc.variables['ADDRESS_SANITIZER_ON'] = 'ON'
+        if self.settings.build_type != "Debug":
+            tc.variables['TCMALLOC_ON'] = 'ON'
         tc.generate()
         CMakeDeps(self).generate()
 

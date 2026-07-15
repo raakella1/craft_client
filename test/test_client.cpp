@@ -711,6 +711,41 @@ TEST(CraftClient, BehindMemberIsRoutedAround) {
     EXPECT_TRUE(cl.client->route_caught_up(1)) << "follower 1 held it; still caught up";
 }
 
+// (f) Regression: a live member that missed an acked write must stay routed-around ACROSS a re-login. reset()
+// drops the per-member Missing map, so post-relogin read safety rests entirely on Synced -- and the client
+// seeds each member's Synced baseline from its REAL commit_lsn (carried per-member in the login reply), NOT
+// blanket L. The login barrier guarantees only quorum durability + leader completeness, so a laggard's
+// commit_lsn stalls below L and it stays ineligible until it resyncs. Before the fix, Synced was seeded at L
+// for everyone, so the stale follower was trusted and served the OLD value on reads the rotor sent its way.
+TEST(CraftClient, ReLoginMustNotServeStaleFollower) {
+    auto cl = make_cluster(3); // leader == 0
+    constexpr uint64_t B = 6;
+    auto v_old = page_of(0xAA);
+    auto v_new = page_of(0xBB);
+
+    ASSERT_TRUE(wr(*cl.client, B, v_old)); // dLSN 0: all three ack -> member 2 holds 0xAA at block B
+
+    // dLSN 1: leader + follower 1 ack; follower 2 provably misses it (still holds 0xAA at B).
+    cl.set.net->force_subquorum({craft::mem_replica_id(cl.vid, 0), craft::mem_replica_id(cl.vid, 1)});
+    ASSERT_TRUE(wr(*cl.client, B, v_new));
+    cl.set.net->clear_faults(); // member 2 is UP again -- reachable, but still missing dLSN 1
+
+    // Pre-relogin: the read folds the miss into the map and routes around the behind member.
+    EXPECT_EQ(rd(*cl.client, B), v_new) << "pre-relogin: routed around the stale follower";
+    EXPECT_FALSE(cl.client->route_caught_up(2)) << "member 2 missed the acked write";
+
+    // Re-login drops the Missing map; member 2 is now gated only by Synced, which the client seeds from member
+    // 2's own commit_lsn (< L, since it never applied dLSN 1) -- so it stays ineligible despite still holding 0xAA.
+    ASSERT_TRUE(rg(cl.client->logout()).has_value());
+    ASSERT_TRUE(rg(cl.client->login(TOKEN)).has_value());
+    EXPECT_FALSE(cl.client->route_caught_up(2)) << "member 2 still behind after re-login -- must not be trusted";
+
+    // Every read must return the committed 0xBB. Read enough times that the round-robin rotor would visit all
+    // three members; member 2 is ineligible (behind), so no read is ever routed to its stale copy.
+    for (int i = 0; i < 9; ++i)
+        EXPECT_EQ(rd(*cl.client, B), v_new) << "read " << i << " served a stale value after re-login";
+}
+
 // Broadcast keep_alive learns every member's achieved commit_lsn and advances the set-wide reclaim floor
 // (min across members). Healthy: all members apply up to the frontier, so the floor equals it.
 TEST(CraftClient, KeepAliveAdvancesReclaimFloor) {
@@ -804,16 +839,22 @@ TEST(ReadRouteMap, OneOutstandingKeepAlivePerLeg) {
 // that rd() returns before they land -- we poll for them).
 TEST(CraftClient, ReadDrivesKeepAliveToSkippedLegs) {
     auto cl = make_cluster(3);
+    // Admission HELO-probes every member with a keep_alive, so measure deltas from that baseline, not from zero.
+    std::array< std::size_t, 3 > base{};
+    for (uint32_t i = 0; i < 3; ++i)
+        base[i] = cl.set.replicas[i]->keepalives_served();
+
     auto v = page_of(0x77);
     ASSERT_TRUE(wr(*cl.client, 2, v));
     for (uint32_t i = 0; i < 3; ++i)
-        EXPECT_EQ(cl.set.replicas[i]->keepalives_served(), 0u) << "a write broadcasts to all; it drives no keep_alive";
+        EXPECT_EQ(cl.set.replicas[i]->keepalives_served(), base[i])
+            << "a write broadcasts to all; it drives no keep_alive";
 
     ASSERT_EQ(rd(*cl.client, 2), v);
     auto total_ka = [&] {
         std::size_t n = 0;
         for (uint32_t i = 0; i < 3; ++i)
-            n += cl.set.replicas[i]->keepalives_served();
+            n += cl.set.replicas[i]->keepalives_served() - base[i];
         return n;
     };
     auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
