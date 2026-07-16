@@ -13,93 +13,6 @@ picture readable.
 classDiagram
     direction TB
 
-    %% ── the engine seam: what craft_client programs against ──
-    class craft_replica {
-        <<interface>>
-        +login(client_token)
-        +logout(hdr)
-        +write(q, hdr, dlsn, addr, len, data)
-        +read(q, hdr, read_lsn, addr, len, dest)
-        +keep_alive(q, hdr)
-        +request_resolution(q, hdr, upto)
-        +id() peer_id_t
-    }
-
-    class io_uring {
-        <<caller-owned ring: a ublk hw queue's, or a test's>>
-    }
-
-    namespace PublicSurface {
-        class tcp_cluster {
-            <<opaque handle, craft/tcp.hpp>>
-            +backends() craft_replica shared_ptrs
-        }
-        class craft_conn {
-            <<blocking io_uring TCP conn>>
-            +connect(host, port, timeout)$
-            +adopt(fd)$
-            +send_all(data) bool
-            +recv_message(max_tx, timeout, dg)
-            -fd_ int
-            -ring_ its OWN ring, submit-and-wait
-        }
-        class craft_listener {
-            +bind_listen(port)$
-            +accept() craft_conn
-            +port() uint16_t
-        }
-        class net_error {
-            <<enumeration>>
-            setup, connect, send, recv
-            closed, malformed
-            invalid_argument, timed_out
-        }
-    }
-
-    namespace ClientSide {
-        class CraftTcpReplica {
-            <<the adapter: craft_replica over the wire>>
-            +shutdown() drain in-flight ops
-            -hop() resume on mgr thread
-            -conn_for(q) slot lookup or append
-            -ensure_connected() ensure_bound(term)
-            -on_net_fault(e) poison + map to domain
-            -rt_read_ rt_write_ rt_keepalive_ rt_stat
-        }
-        class wire_client {
-            <<blocking, wire-only>>
-            +connect(host, port, timeout)$
-            +login(volume_id, client_token)
-            +helo(volume_id, client_token, term)
-            +logout()
-            +write read keep_alive resolve
-            +set_op_timeout(t)
-        }
-        class craft_async_conn {
-            <<on-ring data path, many ops in flight>>
-            +ensure_ready(vol, token, term)
-            +write read keep_alive resolve
-            +shutdown() after ring quiesce
-            -run_pump() persistent recv, demux by request_id
-            -round_trip(op, hdr, body)
-            -pending_ request_id to reply_slot
-        }
-        class craft_session_mgr {
-            <<one process-wide admin thread>>
-            +get()$ refcounted
-            +post(job)
-            +drain() FIFO fence
-            +on_mgr_thread() bool
-        }
-        class reply_values {
-            <<value structs, wire_client.hpp>>
-            login_result
-            lsn_reply
-            read_reply
-            resolve_reply
-        }
-    }
-
     namespace ServerSide {
         class craft_tcp_server {
             <<one replica over TCP>>
@@ -147,32 +60,12 @@ classDiagram
         }
     }
 
-    craft_replica <|.. CraftTcpReplica : implements (over the wire)
-    craft_replica <|.. MemCraftReplica : implements (in process)
-
-    tcp_cluster o-- "N" CraftTcpReplica : proxies_ / backends()
     TcpReplicaSet o-- "1" craft_cluster_server : server
-    TcpReplicaSet o-- "N" CraftTcpReplica : replicas
-
-    CraftTcpReplica *-- "1" wire_client : conn_ (admin + null-q tier, mgr thread only)
-    CraftTcpReplica o-- "1" craft_session_mgr : mgr_ (shared by every proxy in the process)
-    CraftTcpReplica *-- "0..64" craft_async_conn : slots_ (one per caller ring, lazy)
-    CraftTcpReplica ..> net_error : on_net_fault() maps to domain error
-
-    wire_client *-- "1" craft_conn : conn_
-    wire_client ..> reply_values : returns
-    craft_async_conn ..> reply_values : returns (same types)
-    craft_async_conn --> io_uring : ring_ (borrowed, every SQE goes here)
-
-    craft_listener ..> craft_conn : accept() yields
 
     craft_tcp_server *-- "1" server_geometry : geo_
     craft_tcp_server o-- "1" MemCraftReplica : replica_ (pimpl, in the .cpp)
-    craft_tcp_server ..> craft_conn : serve(conn)
 
     craft_cluster_server *-- "1" MemReplicaGroup : pimpl wraps (in the .cpp)
-    craft_cluster_server *-- "N" craft_listener : one loopback port per member
-    craft_cluster_server ..> craft_conn : one serve thread per accepted conn
 
     MemReplicaGroup o-- "N" MemCraftReplica : replicas
     MemReplicaGroup o-- "1" MemTransport : net
