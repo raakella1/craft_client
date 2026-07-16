@@ -1,6 +1,8 @@
 # craft_client -- the CRAFT reference client, wire protocol, and reference model
 
-[![Conan Build](https://github.com/szmyd/craft_client/actions/workflows/build_commit.yml/badge.svg?branch=dev/v0.x)](https://github.com/szmyd/craft_client/actions/workflows/build_commit.yml)
+[![Conan Build](https://github.com/szmyd/craft_client/actions/workflows/conan_build.yml/badge.svg?branch=dev/v0.x)](https://github.com/szmyd/craft_client/actions/workflows/conan_build.yml)
+[![codecov](https://codecov.io/github/szmyd/craft_client/graph/badge.svg?token=JW7LC97YM2)](https://codecov.io/github/szmyd/craft_client)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A **standalone, transport-agnostic, storage-engine-free** package for the client half of **CRAFT**
 (Client Assisted RAFT), the replication protocol for HomeBlocks block volumes. Extracted from HomeBlocks so
