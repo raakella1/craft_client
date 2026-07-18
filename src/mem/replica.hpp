@@ -36,6 +36,7 @@
 #include <vector>
 
 #include <craft/client.hpp>  // result types
+#include <craft/wire.hpp>
 #include "craft_peer.hpp"    // the PEER plane: craft_peer + JournalSlot + lba_t (this model is its only implementer)
 #include "craft_replica.hpp" // the CLIENT plane: the craft_replica interface
 
@@ -120,7 +121,8 @@ public:
     // How many Missing dLSNs stats() lists individually. The count is always exact.
     static constexpr std::size_t k_missing_sample = 16;
 
-    MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net);
+    MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net,
+                    std::optional< uint16_t > raft_port = std::nullopt);
 
     // Snapshot this replica's state. Takes mu_ and deliberately does NOT consult net_: do_write() locks
     // the transport before mu_, so reading net_ under mu_ here would invert that order. Callers that want
@@ -191,9 +193,14 @@ public:
     // The standalone (one-process = one-replica) resolution round: itself lacking a slot IS the quorum-lacks
     // evidence at N=1, so every hole <= upto is verdicted Empty and the frontier advances through it.
     result< resolution_result > srv_resolve(client_hdr hdr, int64_t upto) { return do_resolve_local(hdr, upto); }
-    void srv_establish(uint64_t client_token, uint64_t term) { cold_apply_login(client_token, term); }
+    void srv_establish(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term) {
+        apply_login(volume_id, client_token, term);
+    }
     void srv_end() { cold_apply_logout(); }
     lsn_pair srv_lsns() { return peek_lsns(); }
+
+    result< void > srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
+                                     std::vector< wire::member > const& members);
 
 private:
     friend class MemTransport; // the cold path drives the cold_* / peek helpers below directly, and the IO
@@ -259,6 +266,12 @@ private:
     void cold_apply_login(uint64_t client_token, uint64_t term);
     void cold_apply_logout();
     void cold_truncate_above(int64_t rs_commit_lsn);
+
+    // real hooks using raft channel
+    // void apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
+    void apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term);
+    // void apply_logout();
+    // void apply_truncate_above(int64_t rs_commit_lsn);
 
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.

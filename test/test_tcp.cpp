@@ -294,3 +294,45 @@ TEST(CraftTcp, ConnectDeadlineBoundsABlackholedPeer) {
     EXPECT_FALSE(c.has_value());
     EXPECT_LT(elapsed, std::chrono::seconds{5}) << "connect must fail at the deadline, not the SYN-retry window";
 }
+
+TEST(CraftTcp, ServerWithRaft) {
+    auto lst = craft_listener::bind_listen(0);
+    ASSERT_TRUE(lst.has_value());
+    uint16_t const port = lst->port();
+
+    craft_tcp_server server{make_geo(), 6666};
+    std::jthread srv([&] {
+        auto conn = lst->accept();
+        if (conn) server.serve(std::move(*conn));
+    });
+
+    {
+        auto cli = wire_client::connect("127.0.0.1", port);
+        ASSERT_TRUE(cli.has_value());
+
+        auto lr = cli->login(/*volume_id=*/{}, 0xABCD);
+        ASSERT_TRUE(lr.has_value());
+        EXPECT_EQ(lr->term, 1u);
+        EXPECT_EQ(lr->capacity, uint64_t{1} << 30);
+        EXPECT_EQ(lr->lba_size, k_lba);
+        EXPECT_EQ(lr->max_tx, 512u * 1024);
+        // The login WATERMARK: the LAST dLSN already durable, which on a fresh replica is -1. NOT the next dLSN
+        // to use -- the client derives that itself (next_dlsn_ = dlsn + 1). This assertion used to read `0` (and
+        // the server used to send last_append_lsn + 1 to match), which meant the client started at dLSN 1 and
+        // slot 0 was never written: every replica sat permanently Missing dLSN 0, apply_up_to() stalled there,
+        // and commit_lsn pinned at -1 forever. Reads still served correct bytes off the journal-tail overlay, so
+        // nothing failed -- it only showed up as a read walking the entire journal tail. Hence the guard below.
+        EXPECT_EQ(lr->dlsn, -1);
+        ASSERT_EQ(lr->members.size(), 1u);
+        EXPECT_EQ(lr->members[0].addr, "127.0.0.1:0");
+        EXPECT_EQ(lr->members[0].id[0], 0x01);
+
+        auto lo = cli->logout();
+        ASSERT_TRUE(lo.has_value());
+        EXPECT_EQ(*lo, wire::status::ok);
+
+        auto lo2 = cli->logout(); // the session is gone -> fenced
+        ASSERT_TRUE(lo2.has_value());
+        EXPECT_EQ(*lo2, wire::status::stale_term);
+    }
+}

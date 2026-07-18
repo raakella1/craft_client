@@ -133,7 +133,8 @@ ENUM(craft_error, uint16_t,
      NO_QUORUM,      // could not reach a quorum of live replicas
      WRONG_TOKEN,    // client_token is not the current owner
      NOT_ELIGIBLE,   // replica cannot serve this read (Missing overlap / below login-dLSN L)
-     REPLICA_DOWN);  // addressed replica is down (fault injection / unreachable)
+     REPLICA_DOWN,   // addressed replica is down (fault injection / unreachable)
+     INTERNAL);      // unexpected internal failure
 
 class craft_error_category : public std::error_category {
 public:

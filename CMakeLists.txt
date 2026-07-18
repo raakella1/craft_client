@@ -28,6 +28,7 @@ endif ()
 find_package(GTest REQUIRED)
 find_package(sisl REQUIRED)
 find_package(liburing REQUIRED)
+find_package(NuraftMesg REQUIRED)
 
 # ── craft_wire: the std-only wire codec LEAF (the future standalone dependency) ──
 add_library(craft_wire STATIC src/wire.cpp)
@@ -63,10 +64,11 @@ add_library(craft_reference STATIC
   src/mem/cluster.cpp
   src/local.cpp # craft/local.hpp: the public "no-remote, in-process" backend builder over the mem model
   src/net/cluster_server.cpp
-  src/net/tcp_server.cpp)
+  src/net/tcp_server.cpp
+  src/mem/peer_comm.cpp)
 target_include_directories(craft_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(craft_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # the internal headers it implements
-target_link_libraries(craft_reference PUBLIC craft_client)
+target_link_libraries(craft_reference PUBLIC craft_client nuraft_mesg::proto)
 target_compile_features(craft_reference PUBLIC cxx_std_23)
 
 # ── craft_reference_tcp_srv: a STANDALONE single-replica reference server. Run N of them on different ports to

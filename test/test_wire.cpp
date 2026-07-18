@@ -72,8 +72,10 @@ TEST(CraftWire, OpHeaderSizes) {
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::logout)), 16u);
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::resolve)), 24u);
     EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::resolve_rsp)), 16u);
+    EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::create_volume)), 24u);
+    EXPECT_EQ(op_hdr_size(static_cast< uint8_t >(op::create_volume_rsp)), 0u);
     EXPECT_FALSE(op_hdr_size(0).has_value());
-    EXPECT_FALSE(op_hdr_size(15).has_value());
+    EXPECT_FALSE(op_hdr_size(17).has_value());
     EXPECT_FALSE(op_hdr_size(99).has_value());
 
     EXPECT_TRUE(is_response(static_cast< uint8_t >(op::write_rsp)));
