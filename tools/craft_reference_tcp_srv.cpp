@@ -32,6 +32,7 @@
 #include <vector>
 
 #include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/string_generator.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <sisl/logging/logging.h>
 #include <sisl/options/options.h>
@@ -45,6 +46,10 @@
 SISL_OPTION_GROUP(craft_srv,
                   (port, "", "port", "Listen port (required)", ::cxxopts::value< uint16_t >()->default_value("0"),
                    "<port>"),
+                  (server_uuid, "", "server_uuid", "Server UUID (optional; random if not provided)",
+                   ::cxxopts::value< std::string >(), "<uuid>"),
+                  (server_config_file, "", "server_config_file", "Server configuration json (optional)",
+                   ::cxxopts::value< std::string >(), "<file>"),
                   (capacity, "", "capacity", "Volume capacity in bytes (default 1 GiB)",
                    ::cxxopts::value< uint64_t >()->default_value("0"), "<bytes>"),
                   (lba_size, "", "lba_size", "Block size in bytes",
@@ -55,7 +60,7 @@ SISL_OPTION_GROUP(craft_srv,
 #define SRV_OPTIONS logging, craft_srv
 SISL_OPTIONS_ENABLE(SRV_OPTIONS)
 SISL_LOGGING_DEF(craft)  // DEFINE the module (INIT alone only references it -> "undefined symbol module_level_craft")
-SISL_LOGGING_INIT(craft) // register it for level control
+SISL_LOGGING_INIT(craft, nuraft_mesg, grpc_server) // register it for level control
 
 namespace {
 std::atomic< bool > g_stop{false};
@@ -65,6 +70,8 @@ void on_signal(int) { g_stop.store(true); }
 int main(int argc, char** argv) {
     SISL_OPTIONS_LOAD(argc, argv, SRV_OPTIONS);
     sisl::logging::SetLogger("craft_reference_tcp_srv");
+    sisl::logging::SetModuleLogLevel("nuraft_mesg", spdlog::level::info);
+    sisl::logging::SetModuleLogLevel("grpc_server", spdlog::level::info);
 
     auto const port = SISL_OPTIONS["port"].as< uint16_t >();
     if (port == 0) {
@@ -84,7 +91,15 @@ int main(int argc, char** argv) {
     geo.lba_size = lba_size;
     geo.max_tx = max_tx;
     craft::wire::member self{};
-    auto const id = boost::uuids::random_generator()();
+    auto id = boost::uuids::random_generator()();
+    if (SISL_OPTIONS.count("server_uuid")) {
+        try {
+            id = boost::uuids::string_generator()(SISL_OPTIONS["server_uuid"].as< std::string >());
+        } catch (std::exception const& e) {
+            std::cerr << "Invalid --server_uuid: " << e.what() << "\n";
+            return 2;
+        }
+    }
     std::copy(id.begin(), id.end(), self.id.begin());
     self.addr = "127.0.0.1:" + std::to_string(port);
     geo.members.push_back(self);
@@ -97,7 +112,12 @@ int main(int argc, char** argv) {
     // The server (replica + session state) is shared across connections: the client keeps a login connection AND
     // an on-ring data connection open at once, and they must see the same session. Session state races are benign
     // -- login and the data HELO both set the same term -- so a plain shared instance is fine for the reference.
-    craft::net::craft_tcp_server server{std::move(geo)};
+    // use peer comm port if provided
+    std::string server_config_file{};
+    if (SISL_OPTIONS.count("server_config_file")) {
+        server_config_file = SISL_OPTIONS["server_config_file"].as< std::string >();
+    }
+    craft::net::craft_tcp_server server{std::move(geo), server_config_file};
 
     // sigaction WITHOUT SA_RESTART: glibc's signal() sets SA_RESTART, which auto-restarts the blocking accept()
     // after the handler runs, so the loop would never re-check g_stop and Ctrl-C could not stop the server. With

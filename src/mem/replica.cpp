@@ -15,7 +15,8 @@
 
 #include "mem/replica.hpp"
 #include "mem/cluster.hpp" // the full MemTransport type
-#include "mem/peer_comm.hpp" // for raft channel
+#include "raft/raft_service.hpp" // for raft channel
+#include "helper.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -24,7 +25,6 @@
 
 #include <liburing.h>               // the on-ring data path: SQE prep / user_data
 #include <sisl/async/cqe_state.hpp> // sisl::async::cqe_awaitable + the managed-user_data contract the reap loop shares
-#include <libnuraft/srv_config.hxx>
 
 namespace craft {
 
@@ -50,16 +50,12 @@ std::shared_ptr< std::vector< uint8_t > > take_payload(sisl::sg_list const& s) {
 }
 } // namespace
 
-MemCraftReplica::MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net,
-                                 std::optional< uint16_t > raft_port) :
+MemCraftReplica::MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net) :
         ep_{std::move(ep)}, page_size_{page_size}, net_{std::move(net)} {
     // Publish the initial (healthy) fault snapshot before any IO can read it.
     auto initial = std::make_unique< replica_faults const >();
     faults_.store(initial.get(), std::memory_order_release);
     fault_retired_.push_back(std::move(initial));
-
-    // init raft channel (if raft_port is provided)
-    if (raft_port.has_value()) { peer_comm::instance()->init_raft_server(ep_.id, raft_port.value()); }
 }
 
 // ── fault injection (COW; readers never block, and a reader holding the old snapshot stays valid) ──
@@ -220,7 +216,7 @@ async_result< resolution_result > MemCraftReplica::request_resolution(::io_uring
 }
 
 async_result< lsn_pair > MemCraftReplica::get_lsns() { co_return do_lsns(); }
-async_result< lsn_pair > MemCraftReplica::get_rs_commit_lsn() { co_return do_lsns(); }
+async_result< lsn_pair > MemCraftReplica::get_rs_commit_lsn(uint64_t term, bool is_login) { co_return do_lsns(); }
 async_result< std::vector< JournalSlot > > MemCraftReplica::fetch_data(std::vector< int64_t > lsns) {
     co_return do_fetch(lsns);
 }
@@ -288,6 +284,11 @@ result< lsn_pair > MemCraftReplica::do_keep_alive(client_hdr hdr) {
 }
 
 result< lsn_pair > MemCraftReplica::do_lsns() {
+    std::lock_guard< std::mutex > g{mu_};
+    return lsn_pair{state_.commit_lsn, state_.last_append_lsn};
+}
+
+result< lsn_pair > MemCraftReplica::do_get_rs_commit_lsn(uint64_t term, bool is_login) {
     if (net_ && !net_->is_up(ep_.id)) return fail(craft_error::REPLICA_DOWN);
     std::lock_guard< std::mutex > g{mu_};
     return lsn_pair{state_.commit_lsn, state_.last_append_lsn};
@@ -578,26 +579,7 @@ std::vector< int64_t > MemCraftReplica::peek_empties(int64_t upto) {
 // create peer raft group and add members to it.
 result< void > MemCraftReplica::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
                                                   std::vector< wire::member > const& members) {
-    auto const group_id = craft::to_uuid(volume_id);
-    auto consensus = peer_comm::instance()->get_consensus();
-
-    // Seat THIS replica as leader by creating the group.
-    if (auto const status = craft::sync_get(consensus->create_group(group_id, peer_comm::default_group_type_));
-        !status) {
-        return fail(craft_error::INTERNAL);
-    }
-
-    // Add every OTHER member as a follower.
-    for (auto const& m : members) {
-        auto const member_id = craft::to_uuid(m.id);
-        if (member_id == ep_.id) continue;
-
-        auto srv_cfg = nuraft::srv_config(nuraft_mesg::to_server_id(member_id), 0, m.addr, "", false);
-        if (auto const result = craft::sync_get(consensus->add_member(group_id, srv_cfg)); !result) {
-            return fail(craft_error::INTERNAL);
-        }
-    }
-    return {};
+    return raft_service::instance()->srv_create_volume(volume_id, members);
 }
 
 } // namespace craft

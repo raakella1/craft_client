@@ -35,8 +35,7 @@
 #include <string>
 #include <vector>
 
-#include <craft/client.hpp>  // result types
-#include <craft/wire.hpp>
+#include <craft/client.hpp> // result types
 #include "craft_peer.hpp"    // the PEER plane: craft_peer + JournalSlot + lba_t (this model is its only implementer)
 #include "craft_replica.hpp" // the CLIENT plane: the craft_replica interface
 
@@ -44,9 +43,11 @@ namespace craft {
 
 class MemTransport; // in-process network + cold path
 
+namespace wire {
+struct member;
+}
+
 using sisl::ok;
-template < typename T >
-using result = sisl::result< T >;
 using status = sisl::status;
 
 // Per-partition CRAFT state, internal to a replica implementation. Authoritative in memory; a production replica
@@ -121,8 +122,7 @@ public:
     // How many Missing dLSNs stats() lists individually. The count is always exact.
     static constexpr std::size_t k_missing_sample = 16;
 
-    MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net,
-                    std::optional< uint16_t > raft_port = std::nullopt);
+    MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net);
 
     // Snapshot this replica's state. Takes mu_ and deliberately does NOT consult net_: do_write() locks
     // the transport before mu_, so reading net_ under mu_ here would invert that order. Callers that want
@@ -170,7 +170,7 @@ public:
     // a friend and drives the cold_* / peek_* helpers below directly. Routing it through this interface is step
     // one of making the peer plane real; step two is allocating its opcodes (wire::op stops at 14).
     async_result< lsn_pair > get_lsns() override;
-    async_result< lsn_pair > get_rs_commit_lsn() override;
+    async_result< lsn_pair > get_rs_commit_lsn(uint64_t term, bool is_login) override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
     async_status truncate(int64_t lsn) override;
 
@@ -203,6 +203,10 @@ public:
 
     result< void > srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
                                      std::vector< wire::member > const& members);
+    result< lsn_pair > srv_get_rs_commit_lsn(uint64_t term, bool is_login) {
+        return do_get_rs_commit_lsn(term, is_login);
+    }
+    result< std::vector< JournalSlot > > srv_fetch_data(std::vector< int64_t > const& lsns) { return do_fetch(lsns); }
 
 private:
     friend class MemTransport; // the cold path drives the cold_* / peek helpers below directly, and the IO
@@ -239,6 +243,7 @@ private:
     result< read_result > do_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len, sisl::sg_list dest);
     result< lsn_pair > do_keep_alive(client_hdr hdr);
     result< lsn_pair > do_lsns();
+    result< lsn_pair > do_get_rs_commit_lsn(uint64_t term, bool is_login);
     status do_truncate(int64_t lsn);
     result< std::vector< JournalSlot > > do_fetch(std::vector< int64_t > const& lsns);
     result< resolution_result > do_resolve_local(client_hdr hdr, int64_t upto); // N=1 resolution (srv seam)

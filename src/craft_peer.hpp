@@ -47,6 +47,7 @@
 #include <sisl/fds/buffer.hpp> // sisl::sg_list
 
 #include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases
+#include <craft/client.hpp> // result types
 
 namespace craft {
 
@@ -78,7 +79,7 @@ public:
     // Snapshot {commit_lsn, last_append_lsn} for this replica -- the leader's GetRSCommitLSN poll. Identical to
     // what the client plane's keep_alive returns, but asked by a peer, not a client.
     virtual async_result< lsn_pair > get_lsns() = 0;
-    virtual async_result< lsn_pair > get_rs_commit_lsn() = 0;
+    virtual async_result< lsn_pair > get_rs_commit_lsn(uint64_t term, bool is_login) = 0;
 
     // Pull raw journal data for the requested dLSNs -- the resync fetch. A slot this replica has verdicted Empty
     // comes back as JournalSlot{.is_empty = true} rather than an error; a slot it simply does not hold is omitted.

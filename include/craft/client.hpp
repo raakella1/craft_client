@@ -56,6 +56,8 @@ class craft_replica;
 template < typename T >
 using async_result = sisl::async::light_result< T >;
 using async_status = sisl::async::light_status;
+template < typename T >
+using result = sisl::result< T >;
 
 // ── construction: the ONE seam ──
 //
