@@ -45,8 +45,6 @@
 using namespace craft;
 using namespace craft::test;
 using sisl::ok;
-template < typename T >
-using result = sisl::result< T >;
 using status = sisl::status;
 
 namespace {

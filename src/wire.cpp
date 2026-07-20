@@ -22,23 +22,27 @@ std::optional< std::size_t > op_hdr_size(uint8_t op_code) noexcept {
     // A peer-plane op (15+, see craft_peer.hpp) must add its row here AND bump op::k_max_op -- the static_assert
     // below makes forgetting either one a compile error rather than an unknown_op at runtime.
     static constexpr std::size_t k[] = {
-        0,                         // 0  unused
-        sizeof(login_req),         // 1  login
-        sizeof(login_rsp),         // 2  login_rsp
-        sizeof(helo_req),          // 3  helo
-        0,                         // 4  helo_rsp (status only)
-        sizeof(write_req),         // 5  write
-        sizeof(write_rsp),         // 6  write_rsp
-        sizeof(read_req),          // 7  read
-        sizeof(read_rsp),          // 8  read_rsp
-        sizeof(keepalive_req),     // 9  keepalive
-        sizeof(keepalive_rsp),     // 10 keepalive_rsp
-        sizeof(logout_req),        // 11 logout
-        0,                         // 12 logout_rsp (status only)
-        sizeof(resolve_req),       // 13 resolve
-        sizeof(resolve_rsp),       // 14 resolve_rsp
-        sizeof(volume_create_req), // 15 create_volume
-        0,                         // 16 create_volume_rsp (status only)
+        0,                             // 0  unused
+        sizeof(login_req),             // 1  login
+        sizeof(login_rsp),             // 2  login_rsp
+        sizeof(helo_req),              // 3  helo
+        0,                             // 4  helo_rsp (status only)
+        sizeof(write_req),             // 5  write
+        sizeof(write_rsp),             // 6  write_rsp
+        sizeof(read_req),              // 7  read
+        sizeof(read_rsp),              // 8  read_rsp
+        sizeof(keepalive_req),         // 9  keepalive
+        sizeof(keepalive_rsp),         // 10 keepalive_rsp
+        sizeof(logout_req),            // 11 logout
+        0,                             // 12 logout_rsp (status only)
+        sizeof(resolve_req),           // 13 resolve
+        sizeof(resolve_rsp),           // 14 resolve_rsp
+        sizeof(volume_create_req),     // 15 create_volume
+        0,                             // 16 create_volume_rsp (status only)
+        sizeof(get_rs_commit_lsn_req), // 17 get_rs_commit_lsn
+        sizeof(get_rs_commit_lsn_rsp), // 18 get_rs_commit_lsn_rsp
+        sizeof(fetch_data_req),        // 19 fetch_data
+        sizeof(fetch_data_rsp),        // 20 fetch_data_rsp
     };
     static_assert(std::size(k) == static_cast< std::size_t >(op::k_max_op) + 1,
                   "op_hdr_size table and op::k_max_op disagree -- a new opcode was added without a header size, "
@@ -54,10 +58,11 @@ bool is_response(uint8_t op_code) noexcept {
 }
 
 bool op_allows_body(uint8_t op_code) noexcept {
-    return op_code == static_cast< uint8_t >(op::write) ||  // data
-        op_code == static_cast< uint8_t >(op::login_rsp) || // member list
-        op_code == static_cast< uint8_t >(op::read_rsp) ||  // extents + data
-        op_code == static_cast< uint8_t >(op::resolve_rsp); // Empty-verdict dLSN list
+    return op_code == static_cast< uint8_t >(op::write) ||    // data
+        op_code == static_cast< uint8_t >(op::login_rsp) ||   // member list
+        op_code == static_cast< uint8_t >(op::read_rsp) ||    // extents + data
+        op_code == static_cast< uint8_t >(op::resolve_rsp) || // Empty-verdict dLSN list
+        op_code == static_cast< uint8_t >(op::create_volume); // member list
 }
 
 namespace {

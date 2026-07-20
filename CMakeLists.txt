@@ -58,17 +58,35 @@ target_include_directories(craft_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(craft_client PUBLIC craft_wire craft_types sisl::sisl liburing::liburing)
 target_compile_features(craft_client PUBLIC cxx_std_23)
 
+# ── craft_replica_mgr: the internal replica manager (testing only) ──
+add_library(craft_replica_mgr STATIC
+  src/replica_mgr.cpp
+  src/net/tcp_peer.cpp)
+target_include_directories(craft_replica_mgr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(craft_replica_mgr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(craft_replica_mgr PUBLIC craft_client)
+target_compile_features(craft_replica_mgr PUBLIC cxx_std_23)
+
 # ── craft_reference: the in-memory reference model + loopback cluster server (test-support only) ──
+add_library(raft_service STATIC
+  src/mem/raft/raft_service.cpp
+  src/mem/raft/in_memory_log_store.cpp
+  src/mem/raft/raft_state_manager.cpp)
+target_include_directories(raft_service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(raft_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(raft_service PUBLIC nuraft_mesg::proto craft_replica_mgr)
+target_compile_features(raft_service PUBLIC cxx_std_23)
+
 add_library(craft_reference STATIC
   src/mem/replica.cpp
   src/mem/cluster.cpp
   src/local.cpp # craft/local.hpp: the public "no-remote, in-process" backend builder over the mem model
   src/net/cluster_server.cpp
   src/net/tcp_server.cpp
-  src/mem/peer_comm.cpp)
+  src/net/tcp_peer.cpp)
 target_include_directories(craft_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(craft_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # the internal headers it implements
-target_link_libraries(craft_reference PUBLIC craft_client nuraft_mesg::proto)
+target_link_libraries(craft_reference PUBLIC craft_replica_mgr raft_service)
 target_compile_features(craft_reference PUBLIC cxx_std_23)
 
 # ── craft_reference_tcp_srv: a STANDALONE single-replica reference server. Run N of them on different ports to
