@@ -43,10 +43,6 @@ namespace craft {
 
 class MemTransport; // in-process network + cold path
 
-namespace wire {
-struct member;
-}
-
 using sisl::ok;
 using status = sisl::status;
 
@@ -107,6 +103,21 @@ struct replica_faults {
     std::chrono::milliseconds delay{0}; // injected network latency to this replica
 };
 
+// The server's per-volume geometry -- what LOGIN advertises; the replica's journal/index is built from it.
+struct server_geometry {
+    uint64_t capacity;
+    uint32_t lba_size;
+    replica_endpoint ep;
+};
+
+// login resp passed to tcp layer
+struct login_establish_result {
+    server_geometry geo;
+    uint64_t term;
+    int64_t dlsn;
+    std::vector< replica_endpoint > members;
+};
+
 // enable_shared_from_this: a write the transport timed out is delivered late, from the transport's timer
 // thread. That closure must hold a WEAK reference here (a strong one would cycle: replica -> net_ -> closure
 // -> replica), so the replica must be reachable as a shared_ptr. It always is; make_mem_replica_group is the
@@ -123,6 +134,7 @@ public:
     static constexpr std::size_t k_missing_sample = 16;
 
     MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net);
+    MemCraftReplica(server_geometry geo);
 
     // Snapshot this replica's state. Takes mu_ and deliberately does NOT consult net_: do_write() locks
     // the transport before mu_, so reading net_ under mu_ here would invert that order. Callers that want
@@ -172,7 +184,7 @@ public:
     async_result< lsn_pair > get_rs_commit_lsn(uint64_t term, bool is_login) override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
 
-    peer_id_t id() const override { return ep_.id; } // craft_replica
+    peer_id_t id() const override { return geo_.ep.id; } // craft_replica
 
     // ── local-server surface: drive this replica directly, with an EXTERNAL transport (the TCP frontend,
     // craft_tcp_server, or any real network) as the wire. Each wraps a synchronous core WITHOUT a
@@ -193,14 +205,14 @@ public:
     // The standalone (one-process = one-replica) resolution round: itself lacking a slot IS the quorum-lacks
     // evidence at N=1, so every hole <= upto is verdicted Empty and the frontier advances through it.
     result< resolution_result > srv_resolve(client_hdr hdr, int64_t upto) { return do_resolve_local(hdr, upto); }
-    void srv_establish(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term) {
-        apply_login(volume_id, client_token, term);
+    result< login_establish_result > srv_establish(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token) {
+        return apply_login(volume_id, client_token);
     }
     void srv_end() { cold_apply_logout(); }
     lsn_pair srv_lsns() { return peek_lsns(); }
 
     result< void > srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                     std::vector< wire::member > const& members);
+                                     std::vector< replica_endpoint > const& members);
     result< lsn_pair > srv_get_rs_commit_lsn(uint64_t term, bool is_login) {
         return do_get_rs_commit_lsn(term, is_login);
     }
@@ -274,10 +286,12 @@ private:
 
     // real hooks using raft channel
     // void apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
-    void apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term);
+    result< login_establish_result > apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token);
     // void apply_logout();
     // void apply_truncate_above(int64_t rs_commit_lsn);
 
+    // Misc
+    void init_faults();
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.
     std::optional< MemJournalSlot > peek_slot(int64_t dlsn); // copy of the slot, or nullopt if absent
@@ -299,8 +313,7 @@ private:
     std::mutex fault_mu_;                                                  // serializes mutators only
     std::vector< std::unique_ptr< replica_faults const > > fault_retired_; // guarded by fault_mu_
 
-    replica_endpoint ep_;
-    uint32_t page_size_;
+    server_geometry geo_;
     std::shared_ptr< MemTransport > net_;
 
     CraftPartitionState state_;

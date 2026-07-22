@@ -1,4 +1,5 @@
 #include "replica_mgr.hpp"
+#include "helper.hpp"
 
 #include <fstream>
 
@@ -40,28 +41,44 @@ void replica_manager::start_replica_service(std::string const& path) {
 }
 
 std::string replica_manager::lookup_peer(boost::uuids::uuid const& id) const {
-    std::lock_guard< std::mutex > g{mu_};
+    std::shared_lock< std::shared_mutex > g(mu_);
     auto const it = replicas_.find(id);
     if (it == replicas_.end()) return {};
     return it->second.host + ":" + std::to_string(it->second.raft_port);
 }
 
 std::shared_ptr< net::CraftTcpPeer > replica_manager::get_peer_client(boost::uuids::uuid const& id) {
-    std::lock_guard< std::mutex > g{mu_};
-    if (auto it = peer_clients_.find(id); it != peer_clients_.end()) return it->second;
+    std::lock_guard< std::shared_mutex > g{mu_};
 
     auto const rit = replicas_.find(id);
     if (rit == replicas_.end()) return nullptr;
-
-    auto client = std::make_shared< net::CraftTcpPeer >(rit->second.host, rit->second.tcp_port, id);
-    peer_clients_[id] = client;
-    return client;
+    if (!rit->second.peer_client) {
+        rit->second.peer_client = std::make_shared< net::CraftTcpPeer >(rit->second.host, rit->second.tcp_port, id);
+    }
+    return rit->second.peer_client;
 }
 
 std::optional< replica_info > replica_manager::get(boost::uuids::uuid const& id) const {
-    std::lock_guard< std::mutex > g{mu_};
+    std::shared_lock< std::shared_mutex > g(mu_);
     auto const it = replicas_.find(id);
     if (it == replicas_.end()) return std::nullopt;
+    return it->second;
+}
+
+void replica_manager::register_volume(std::array< uint8_t, 16 > const& volume_id,
+                                      std::vector< replica_endpoint > const& members) {
+    std::lock_guard< std::shared_mutex > g{mu_};
+    std::vector< replica_info > rinfos;
+    for (auto const& m : members) {
+        rinfos.emplace_back(replicas_[m.id]);
+    }
+    volumes_[craft::to_uuid(volume_id)] = rinfos;
+}
+
+std::vector< replica_info > replica_manager::get_volume(boost::uuids::uuid const& volume_id) {
+    std::shared_lock< std::shared_mutex > g(mu_);
+    auto const it = volumes_.find(volume_id);
+    if (it == volumes_.end()) return {};
     return it->second;
 }
 

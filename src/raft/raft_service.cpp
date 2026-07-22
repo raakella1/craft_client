@@ -1,7 +1,7 @@
 #include <sisl/logging/logging.h>
 #include "raft_service.hpp"
 #include "raft_state_manager.hpp"
-#include "mem/helper.hpp"
+#include "helper.hpp"
 #include "replica_mgr.hpp"
 
 #include <libnuraft/raft_params.hxx>
@@ -40,7 +40,7 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
 }
 
 result< void > raft_service::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                               std::vector< wire::member > const& members) {
+                                               std::vector< replica_endpoint > const& members) {
     auto const group_id = craft::to_uuid(volume_id);
     auto consensus = raft_service::instance()->get_consensus();
 
@@ -52,14 +52,13 @@ result< void > raft_service::srv_create_volume(std::array< uint8_t, 16 > const& 
 
     // Add every OTHER member as a follower.
     for (auto const& m : members) {
-        auto const member_id = craft::to_uuid(m.id);
-        if (lookup_peer(member_id).empty()) {
+        if (lookup_peer(m.id).empty()) {
             return fail(craft_error::INTERNAL); // sanity: member missing in the server config json
         }
-        if (member_id == server_uuid_) continue;
+        if (m.id == server_uuid_) continue;
 
         auto srv_cfg =
-            nuraft::srv_config(nuraft_mesg::to_server_id(member_id), 0, boost::uuids::to_string(member_id), "", false);
+            nuraft::srv_config(nuraft_mesg::to_server_id(m.id), 0, boost::uuids::to_string(m.id), "", false);
         if (auto const result = craft::sync_get(consensus->add_member(group_id, srv_cfg)); !result) {
             return fail(craft_error::INTERNAL);
         }
@@ -76,9 +75,38 @@ std::string raft_service::lookup_peer(nuraft_mesg::peer_id_t const& peer_id) {
 
 std::shared_ptr< nuraft_mesg::mesg_state_mgr > raft_service::create_state_mgr(int32_t const srv_id,
                                                                               nuraft_mesg::group_id_t const& group_id) {
-    LOGINFO("Creating raft state manager for server_id={} group_id={}, server_uuid={}", srv_id,
-            boost::uuids::to_string(group_id), boost::uuids::to_string(server_uuid_));
-    return std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id);
+    auto result = get_state_mgr(group_id);
+    if (result) {
+        LOGINFO("RAFT state manager for group_id={} already exists, returning existing instance",
+                boost::uuids::to_string(group_id));
+        return result.value();
+    }
+    LOGINFO("Creating RAFT state manager for server_id={} group_id={}", srv_id, boost::uuids::to_string(group_id));
+    auto mgr = std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id);
+    add_state_mgr(group_id, mgr);
+    return mgr;
+}
+
+result< std::shared_ptr< raft_state_mgr > > raft_service::get_state_mgr(nuraft_mesg::group_id_t const& group_id) {
+    std::shared_lock< std::shared_mutex > g{mu_};
+    auto const it = state_mgrs_.find(group_id);
+    if (it == state_mgrs_.end()) return fail(craft_error::INTERNAL);
+    return it->second;
+}
+
+void raft_service::add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::shared_ptr< raft_state_mgr > mgr) {
+    std::lock_guard< std::shared_mutex > g{mu_};
+    state_mgrs_[group_id] = std::move(mgr);
+}
+
+bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
+    auto const state_mgr = get_state_mgr(group_id);
+    if (!state_mgr) {
+        LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
+        return false;
+    }
+    auto* raft_ctx = state_mgr.value()->repl_ctx();
+    return raft_ctx && raft_ctx->is_raft_leader();
 }
 
 } // namespace craft

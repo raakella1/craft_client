@@ -69,9 +69,9 @@ target_compile_features(craft_replica_mgr PUBLIC cxx_std_23)
 
 # ── craft_reference: the in-memory reference model + loopback cluster server (test-support only) ──
 add_library(raft_service STATIC
-  src/mem/raft/raft_service.cpp
-  src/mem/raft/in_memory_log_store.cpp
-  src/mem/raft/raft_state_manager.cpp)
+  src/raft/raft_service.cpp
+  src/raft/in_memory_log_store.cpp
+  src/raft/raft_state_manager.cpp)
 target_include_directories(raft_service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(raft_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(raft_service PUBLIC nuraft_mesg::proto craft_replica_mgr)

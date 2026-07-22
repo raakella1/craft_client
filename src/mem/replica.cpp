@@ -16,7 +16,9 @@
 #include "mem/replica.hpp"
 #include "mem/cluster.hpp" // the full MemTransport type
 #include "raft/raft_service.hpp" // for raft channel
+#include "replica_mgr.hpp"
 #include "helper.hpp"
+#include "craft/types.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -50,13 +52,19 @@ std::shared_ptr< std::vector< uint8_t > > take_payload(sisl::sg_list const& s) {
 }
 } // namespace
 
-MemCraftReplica::MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net) :
-        ep_{std::move(ep)}, page_size_{page_size}, net_{std::move(net)} {
+void MemCraftReplica::init_faults() {
     // Publish the initial (healthy) fault snapshot before any IO can read it.
     auto initial = std::make_unique< replica_faults const >();
     faults_.store(initial.get(), std::memory_order_release);
     fault_retired_.push_back(std::move(initial));
 }
+
+MemCraftReplica::MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net) :
+        geo_{.lba_size = page_size, .ep = std::move(ep)}, net_{std::move(net)} {
+    init_faults();
+}
+
+MemCraftReplica::MemCraftReplica(server_geometry geo) : geo_{std::move(geo)} { init_faults(); }
 
 // ── fault injection (COW; readers never block, and a reader holding the old snapshot stays valid) ──
 
@@ -228,7 +236,7 @@ result< lsn_pair > MemCraftReplica::do_write(client_hdr hdr, int64_t dlsn, uint6
                                              std::shared_ptr< std::vector< uint8_t > > bytes) {
     // Deliverability is the transport's verdict, not ours: by the time we are called, the request arrived.
     // byte-based API: addr/len must be block-aligned (the model works in page_size blocks internally).
-    if (addr % page_size_ != 0 || len % page_size_ != 0 || len == 0) {
+    if (addr % geo_.lba_size != 0 || len % geo_.lba_size != 0 || len == 0) {
         return std::unexpected(std::make_error_condition(std::errc::invalid_argument));
     }
     if (bytes && (bytes->size() != len)) {
@@ -245,8 +253,8 @@ result< lsn_pair > MemCraftReplica::do_write(client_hdr hdr, int64_t dlsn, uint6
 
     MemJournalSlot slot;
     slot.term = hdr.term;
-    slot.lba = addr / page_size_;                            // byte offset -> block index
-    slot.len = static_cast< lba_count_t >(len / page_size_); // byte length -> block count
+    slot.lba = addr / geo_.lba_size;                            // byte offset -> block index
+    slot.len = static_cast< lba_count_t >(len / geo_.lba_size); // byte length -> block count
     slot.all_zeros = !bytes;                                 // no payload => zero write; no all_zeros flag
     slot.bytes = std::move(bytes);                           // adopt the buffer; do not copy it again
     journal_[dlsn] = std::move(slot);
@@ -259,7 +267,7 @@ result< lsn_pair > MemCraftReplica::do_write(client_hdr hdr, int64_t dlsn, uint6
 result< read_result > MemCraftReplica::do_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len,
                                                sisl::sg_list dest) {
     // byte-based API: addr/len block-aligned; dest is a single contiguous buffer covering [addr,addr+len)
-    if (addr % page_size_ != 0 || len % page_size_ != 0 || len == 0) {
+    if (addr % geo_.lba_size != 0 || len % geo_.lba_size != 0 || len == 0) {
         return std::unexpected(std::make_error_condition(std::errc::invalid_argument));
     }
     if (dest.size < len) { return std::unexpected(std::make_error_condition(std::errc::invalid_argument)); }
@@ -286,7 +294,7 @@ result< lsn_pair > MemCraftReplica::do_lsns() {
 }
 
 result< lsn_pair > MemCraftReplica::do_get_rs_commit_lsn(uint64_t term, bool is_login) {
-    if (net_ && !net_->is_up(ep_.id)) return fail(craft_error::REPLICA_DOWN);
+    if (net_ && !net_->is_up(geo_.ep.id)) return fail(craft_error::REPLICA_DOWN);
     std::lock_guard< std::mutex > g{mu_};
     return lsn_pair{state_.commit_lsn, state_.last_append_lsn};
 }
@@ -354,7 +362,7 @@ void MemCraftReplica::apply_slot(int64_t dlsn, MemJournalSlot const& s) {
         }
     } else {
         for (lba_count_t i = 0; i < s.len; ++i) {
-            index_[s.lba + i] = IndexCell{dlsn, s.bytes, static_cast< std::size_t >(i) * page_size_};
+            index_[s.lba + i] = IndexCell{dlsn, s.bytes, static_cast< std::size_t >(i) * geo_.lba_size};
         }
     }
 }
@@ -385,11 +393,11 @@ MemCraftReplica::MemJournalSlot const* MemCraftReplica::highest_slot_le(lba_t x,
 
 std::vector< io_extent > MemCraftReplica::read_range(int64_t H, uint64_t addr, uint64_t len,
                                                      sisl::sg_list const& dest) {
-    lba_t const lba0 = addr / page_size_;
-    lba_count_t const nblk = static_cast< lba_count_t >(len / page_size_);
+    lba_t const lba0 = addr / geo_.lba_size;
+    lba_count_t const nblk = static_cast< lba_count_t >(len / geo_.lba_size);
     std::vector< io_extent > layout;
 
-    // Scatter writer: advances through dest's iovecs sequentially, one page_size_ chunk at a time.
+    // Scatter writer: advances through dest's iovecs sequentially, one geo_.lba_size chunk at a time.
     std::size_t iov_idx{0}, iov_off{0};
     auto sg_write = [&](uint8_t const* src, std::size_t n) {
         while (n > 0 && iov_idx < dest.iovs.size()) {
@@ -420,7 +428,7 @@ std::vector< io_extent > MemCraftReplica::read_range(int64_t H, uint64_t addr, u
         bool hole = true;
         if (auto* s = highest_slot_le(x, H)) {
             if (!s->all_zeros) {
-                page = s->bytes->data() + static_cast< std::size_t >(x - s->lba) * page_size_;
+                page = s->bytes->data() + static_cast< std::size_t >(x - s->lba) * geo_.lba_size;
                 hole = false;
             } // else: zero write => hole
         } else if (auto it = index_.find(x); it != index_.end()) {
@@ -428,17 +436,17 @@ std::vector< io_extent > MemCraftReplica::read_range(int64_t H, uint64_t addr, u
             hole = false;
         }
         // read-time scan: an all-zero data page reads back thin (as a hole).
-        if (!hole && all_zero(page, page_size_)) hole = true;
+        if (!hole && all_zero(page, geo_.lba_size)) hole = true;
 
         // fill the caller's scatter-gather buffer: data pages get bytes, holes get zeros.
-        sg_write(hole ? nullptr : page, page_size_);
+        sg_write(hole ? nullptr : page, geo_.lba_size);
 
         // coalesce the returned layout, in BYTES, with the previous extent if contiguous.
-        uint64_t const x_addr = static_cast< uint64_t >(x) * page_size_;
+        uint64_t const x_addr = static_cast< uint64_t >(x) * geo_.lba_size;
         if (!layout.empty() && layout.back().hole == hole && layout.back().addr + layout.back().len == x_addr) {
-            layout.back().len += page_size_;
+            layout.back().len += geo_.lba_size;
         } else {
-            layout.push_back(io_extent{x_addr, page_size_, hole});
+            layout.push_back(io_extent{x_addr, geo_.lba_size, hole});
         }
     }
     return layout;
@@ -450,9 +458,9 @@ replica_stats MemCraftReplica::stats() const {
     std::lock_guard< std::mutex > g{mu_};
 
     replica_stats s;
-    s.id = ep_.id;
-    s.addr = ep_.addr;
-    s.page_size = page_size_;
+    s.id = geo_.ep.id;
+    s.addr = geo_.ep.addr;
+    s.page_size = geo_.lba_size;
     s.commit_lsn = state_.commit_lsn;
     s.last_append_lsn = state_.last_append_lsn;
     s.term = state_.term;
@@ -470,7 +478,7 @@ replica_stats MemCraftReplica::stats() const {
         } else if (slot.all_zeros) {
             ++s.zero_write_slots;
         } else {
-            s.journal_data_bytes += static_cast< uint64_t >(slot.len) * page_size_;
+            s.journal_data_bytes += static_cast< uint64_t >(slot.len) * geo_.lba_size;
         }
     }
 
@@ -529,11 +537,39 @@ void MemCraftReplica::cold_truncate_above(int64_t rs_commit_lsn) {
 
 // ── peer comm hooks (driven by raft) ──
 
-void MemCraftReplica::apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term) {
+result< login_establish_result > MemCraftReplica::apply_login(std::array< uint8_t, 16 > const& volume_id,
+                                                              uint64_t client_token) {
     // place holder
-    cold_apply_login(client_token, term);
     // Phase 1: collect replica LSN state (non-RAFT broadcast)
+    // 1.1: accepted by leader only.
+    // TODO: what happens if the leader changes before the login is complete?
     auto vol_uuid = craft::to_uuid(volume_id);
+    if (!raft_service::instance()->is_leader(vol_uuid)) {
+        return std::unexpected(make_error_condition(craft_error::NOT_LEADER));
+    }
+
+    // 1.2 collect replica LSN state (non-RAFT broadcast)
+    login_establish_result login_resp;
+    std::vector< lsn_pair > peer_resp;
+    {
+        std::lock_guard< std::mutex > g{mu_};
+        login_resp = login_establish_result{.geo = geo_, .term = ++state_.term, .dlsn = state_.last_append_lsn};
+        peer_resp.emplace_back(lsn_pair{state_.commit_lsn, state_.last_append_lsn});
+    }
+
+    auto const members = replica_manager::instance()->get_volume(vol_uuid);
+    for (auto const m : members) {
+        login_resp.members.emplace_back(replica_endpoint{.id = m.id, .addr = fmt::format("{}:{}", m.host, m.tcp_port)});
+        if (auto r = sisl::async::sync_get(m.peer_client->get_rs_commit_lsn(login_resp.term, true /* is_login */)); r) {
+            peer_resp.emplace_back(r.value());
+        }
+    }
+    // compute watermark as max(quorum.last_append)
+    if (peer_resp.size() <= members.size() / 2) {
+        return std::unexpected(make_error_condition(craft_error::NO_QUORUM));
+    }
+
+    return login_resp;
 }
 
 // ── resolution-round hooks (driven by MemTransport::run_resolution) ──
@@ -575,8 +611,10 @@ std::vector< int64_t > MemCraftReplica::peek_empties(int64_t upto) {
 
 // create peer raft group and add members to it.
 result< void > MemCraftReplica::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                                  std::vector< wire::member > const& members) {
-    return raft_service::instance()->srv_create_volume(volume_id, members);
+                                                  std::vector< replica_endpoint > const& members) {
+    auto const r = raft_service::instance()->srv_create_volume(volume_id, members);
+    if (r) { replica_manager::instance()->register_volume(volume_id, members); }
+    return r;
 }
 
 } // namespace craft

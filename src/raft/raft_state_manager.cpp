@@ -7,7 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "in_memory_log_store.hpp"
-#include "mem/helper.hpp"
+#include "helper.hpp"
 
 namespace craft {
 

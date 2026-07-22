@@ -26,8 +26,9 @@
 
 #include "mem/replica.hpp"  // the full MemCraftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
 #include <craft/status.hpp> // to_wire_status (the shared wire <-> craft_error bridge)
-#include "mem/raft/raft_service.hpp"
+#include "raft/raft_service.hpp"
 #include "replica_mgr.hpp"
+#include "helper.hpp"
 
 namespace craft::net {
 
@@ -38,19 +39,15 @@ std::span< uint8_t const > as_bytes(T const& v) {
 }
 } // namespace
 
-craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& server_config_file) : geo_{std::move(geo)} {
-    replica_endpoint ep;
-    if (!geo_.members.empty()) {
-        std::copy(geo_.members[0].id.begin(), geo_.members[0].id.end(), ep.id.begin()); // wire id[16] -> uuid
-        ep.addr = geo_.members[0].addr;
-    }
+craft_tcp_server::craft_tcp_server(uint32_t max_tx, server_geometry geo, std::string const& server_config_file) :
+        max_tx_{max_tx} {
     // net == nullptr: this replica serves exclusively through its srv_* seam (the TCP frontend IS the wire).
     // start replica service and raft service if server_config_file is provided
     if (!server_config_file.empty()) {
         replica_manager::instance()->start_replica_service(server_config_file);
-        raft_service::instance()->start_raft_service(ep.id);
+        raft_service::instance()->start_raft_service(geo.ep.id);
     }
-    replica_ = std::make_shared< MemCraftReplica >(std::move(ep), geo_.lba_size, nullptr);
+    replica_ = std::make_shared< MemCraftReplica >(std::move(geo));
 }
 
 craft_tcp_server::~craft_tcp_server() = default;
@@ -72,9 +69,9 @@ void craft_tcp_server::log_stats() const {
 
 void craft_tcp_server::serve(craft_conn conn) {
     for (;;) {
-        auto msg = conn.recv_message(geo_.max_tx);
+        auto msg = conn.recv_message(max_tx_);
         if (!msg) return; // peer closed, or a framing error -- done with this connection
-        auto parsed = wire::parse_message(*msg, geo_.max_tx);
+        auto parsed = wire::parse_message(*msg, max_tx_);
         if (!parsed) return;
         switch (static_cast< wire::op >(parsed->hdr.op)) {
         case wire::op::login:
@@ -118,35 +115,31 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
     // accepted (like its fake HELO cold path). A multi-volume server routes the session-establishment by it.
 
     std::vector< uint8_t > out;
-    // fail if there is an active session
-    if (session_active_) {
-        wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::not_eligible),
+
+    auto const lr = wire::decode< wire::login_req >(req.op_header);
+    auto result = replica_->srv_establish(lr.volume_id, lr.client_token);
+    if (!result) {
+        wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(to_wire_status(result.error())),
                             req.hdr.request_id, {}, {});
         conn.send_all(out);
         return;
     }
-
-    auto const lr = wire::decode< wire::login_req >(req.op_header);
-    session_term_ = ++next_term_; // a fresh session term, established (and fenced) on this connection
-    session_active_ = true;
-    replica_->srv_establish(lr.volume_id, lr.client_token, session_term_);
-
-    auto const lsns = replica_->srv_lsns();
+    auto const srv_rsp = result.value();
     wire::login_rsp rsp{};
-    rsp.term = session_term_;
-    // The login WATERMARK: the last dLSN already durable (-1 on a fresh replica), NOT the next one to use -- the
-    // client derives next_dlsn_ = dlsn + 1 itself. This used to send last_append_lsn + 1, which skipped slot 0 on
-    // a fresh cluster: every replica was then permanently Missing dLSN 0, apply_up_to() stalled there forever, and
-    // commit_lsn pinned at -1 -- so no journal reclaimed and every read walked the whole tail. See wire.hpp.
-    rsp.dlsn = lsns.last_append_lsn;
-    rsp.capacity = geo_.capacity;
-    rsp.lba_size = geo_.lba_size;
-    rsp.max_tx = geo_.max_tx;
-    rsp.member_count = static_cast< uint32_t >(geo_.members.size());
+    rsp.term = srv_rsp.term;
+    rsp.dlsn = srv_rsp.dlsn;
+    rsp.capacity = srv_rsp.geo.capacity;
+    rsp.lba_size = srv_rsp.geo.lba_size;
+    rsp.max_tx = max_tx_;
+    rsp.member_count = static_cast< uint32_t >(srv_rsp.members.size());
 
     std::vector< uint8_t > body;
-    for (auto const& m : geo_.members)
-        wire::put_member(body, m);
+    for (auto const& m : srv_rsp.members) {
+        wire::member wm{};
+        std::memcpy(wm.id.data(), &m.id, 16);
+        wm.addr = m.addr;
+        wire::put_member(body, wm);
+    }
 
     wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::ok), req.hdr.request_id,
                         as_bytes(rsp), body);
@@ -155,13 +148,6 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
 
 void craft_tcp_server::on_helo(craft_conn& conn, wire::message const& req) {
     auto const hr = wire::decode< wire::helo_req >(req.op_header);
-    // FAKE cold path (until peer-to-peer replica comms): a follower this client never logged into ADOPTS the
-    // presented (leader's) session term and establishes locally. A fresh cluster starts empty (dLSN -1 on every
-    // replica), so no cross-replica RS-commit-lsn sync is needed yet; term-fencing is what HELO must restore so
-    // subsequent IO at this term is accepted. Re-HELO after a term bump just re-establishes at the new term.
-    session_term_ = hr.term;
-    session_active_ = true;
-    replica_->srv_establish(hr.volume_id, hr.client_token, session_term_);
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::helo_rsp, static_cast< uint8_t >(wire::status::ok), req.hdr.request_id, {}, {});
     conn.send_all(out);
@@ -317,7 +303,11 @@ void craft_tcp_server::on_create_volume(craft_conn& conn, wire::message const& r
     if (!members) {
         code = wire::status::invalid_argument; // body shorter than member_count implies -- malformed request
     } else {
-        auto const r = replica_->srv_create_volume(cr.volume_id, *members);
+        std::vector< replica_endpoint > replica_members;
+        for (auto const& m : *members) {
+            replica_members.emplace_back(replica_endpoint{.id = craft::to_uuid(m.id), .addr = m.addr});
+        }
+        auto const r = replica_->srv_create_volume(cr.volume_id, replica_members);
         if (!r) code = to_wire_status(r.error());
     }
 
