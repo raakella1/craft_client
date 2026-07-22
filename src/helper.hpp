@@ -1,6 +1,6 @@
 #include <boost/uuid/random_generator.hpp>
 #include <nlohmann/json.hpp>
-
+#include <stdexec/execution.hpp>
 
 namespace craft {
 
@@ -10,6 +10,12 @@ inline boost::uuids::uuid to_uuid(std::array< uint8_t, 16 > const& arr) {
     boost::uuids::uuid u{};
     std::copy(arr.begin(), arr.end(), u.begin());
     return u;
+}
+
+inline std::array< uint8_t, 16 > to_array(boost::uuids::uuid const& id) {
+    std::array< uint8_t, 16 > arr{};
+    std::copy(id.begin(), id.end(), arr.begin());
+    return arr;
 }
 
 // make sync coro calls, taken from homestore

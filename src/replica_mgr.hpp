@@ -20,6 +20,7 @@ struct replica_info {
     std::string host;
     uint16_t raft_port{0};
     uint16_t tcp_port{0};
+    std::shared_ptr< net::CraftTcpPeer > peer_client{nullptr};
 };
 
 // Process-wide registry: peer identity -> reachability, and (lazily) the open peer-plane connection to it.
@@ -33,18 +34,18 @@ public:
 
     // raft's messaging_application::lookup_peer bridge: peer_id -> "host:raft_port".
     std::string lookup_peer(boost::uuids::uuid const& id) const;
-
     // wire-plane peer client: lazily connect-and-cache a CraftTcpPeer for this id.
     std::shared_ptr< net::CraftTcpPeer > get_peer_client(boost::uuids::uuid const& id);
-
     std::optional< replica_info > get(boost::uuids::uuid const& id) const;
+    void register_volume(std::array< uint8_t, 16 > const& volume_id, std::vector< replica_endpoint > const& members);
+    std::vector< replica_info > get_volume(boost::uuids::uuid const& volume_id);
 
 private:
     replica_manager() = default;
 
-    mutable std::mutex mu_;
+    mutable std::shared_mutex mu_;
     std::map< boost::uuids::uuid, replica_info > replicas_;                  // static, loaded once
-    std::map< boost::uuids::uuid, std::shared_ptr< net::CraftTcpPeer > > peer_clients_; // lazy, grows on use
+    std::map< boost::uuids::uuid, std::vector< replica_info > > volumes_;
 };
 
 } // namespace craft

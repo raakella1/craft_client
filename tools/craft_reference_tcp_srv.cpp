@@ -39,6 +39,7 @@
 
 #include <craft/net/conn.hpp>
 #include "net/tcp_server.hpp"
+#include "mem/replica.hpp"
 #include <craft/wire.hpp>
 
 // A 0 default means "unset" -> resolved in code (capacity to 1 GiB, max_tx to the single-sourced wire default), so
@@ -84,26 +85,6 @@ int main(int argc, char** argv) {
     uint32_t max_tx = SISL_OPTIONS["max_tx"].as< uint32_t >();
     if (max_tx == 0) max_tx = craft::wire::k_default_max_tx;
 
-    // Advertise this one replica in login_rsp. The id is cosmetic here (the client routes by index, and HELO
-    // fences by term, not id) -- a fresh random id is fine; the client's --craft-tcp supplies its own members.
-    craft::net::server_geometry geo;
-    geo.capacity = capacity;
-    geo.lba_size = lba_size;
-    geo.max_tx = max_tx;
-    craft::wire::member self{};
-    auto id = boost::uuids::random_generator()();
-    if (SISL_OPTIONS.count("server_uuid")) {
-        try {
-            id = boost::uuids::string_generator()(SISL_OPTIONS["server_uuid"].as< std::string >());
-        } catch (std::exception const& e) {
-            std::cerr << "Invalid --server_uuid: " << e.what() << "\n";
-            return 2;
-        }
-    }
-    std::copy(id.begin(), id.end(), self.id.begin());
-    self.addr = "127.0.0.1:" + std::to_string(port);
-    geo.members.push_back(self);
-
     auto lst = craft::net::craft_listener::bind_listen(port);
     if (!lst) {
         std::cerr << "craft_reference_tcp_srv: bind/listen failed on 127.0.0.1:" << port << "\n";
@@ -117,7 +98,23 @@ int main(int argc, char** argv) {
     if (SISL_OPTIONS.count("server_config_file")) {
         server_config_file = SISL_OPTIONS["server_config_file"].as< std::string >();
     }
-    craft::net::craft_tcp_server server{std::move(geo), server_config_file};
+
+    // Advertise this one replica in login_rsp. The id is cosmetic here (the client routes by index, and HELO
+    // fences by term, not id) -- a fresh random id is fine; the client's --craft-tcp supplies its own members.
+    auto id = boost::uuids::random_generator()();
+    if (SISL_OPTIONS.count("server_uuid")) {
+        try {
+            id = boost::uuids::string_generator()(SISL_OPTIONS["server_uuid"].as< std::string >());
+        } catch (std::exception const& e) {
+            std::cerr << "Invalid --server_uuid: " << e.what() << "\n";
+            return 2;
+        }
+    }
+    auto geo =
+        craft::server_geometry{.capacity = capacity,
+                               .lba_size = lba_size,
+                               .ep = craft::replica_endpoint{.id = id, .addr = fmt::format("127.0.0.1:{}", port)}};
+    craft::net::craft_tcp_server server{max_tx, std::move(geo), server_config_file};
 
     // sigaction WITHOUT SA_RESTART: glibc's signal() sets SA_RESTART, which auto-restarts the blocking accept()
     // after the handler runs, so the loop would never re-check g_stop and Ctrl-C could not stop the server. With

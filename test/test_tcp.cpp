@@ -31,6 +31,7 @@
 #include <craft/net/conn.hpp>
 #include "net/wire_client.hpp"
 #include "net/tcp_server.hpp"
+#include "mem/replica.hpp"
 
 using namespace craft::net;
 namespace wire = craft::wire;
@@ -38,17 +39,11 @@ namespace wire = craft::wire;
 namespace {
 
 constexpr uint32_t k_lba = 4096;
+constexpr uint32_t g_max_tx = 512 * 1024;
 
-server_geometry make_geo() {
-    server_geometry geo{};
-    geo.capacity = uint64_t{1} << 30;
-    geo.lba_size = k_lba;
-    geo.max_tx = 512 * 1024;
-    wire::member self{};
-    self.id[0] = 0x01;
-    self.addr = "127.0.0.1:0";
-    geo.members.push_back(self);
-    return geo;
+craft::server_geometry make_geo() {
+    return craft::server_geometry{
+        .capacity = uint64_t{1} << 30, .lba_size = k_lba, .ep = {.id = boost::uuids::uuid{}, .addr = "127.0.0.1:0"}};
 }
 
 // A per-byte-nonzero pattern of `n` bytes -- nonzero so no 4 KiB page collapses to a hole on the read path
@@ -69,7 +64,7 @@ void with_session(F&& body) {
     ASSERT_TRUE(lst.has_value());
     uint16_t const port = lst->port();
 
-    craft_tcp_server server{make_geo()};
+    craft_tcp_server server{g_max_tx, make_geo()};
     std::jthread srv([&] {
         auto conn = lst->accept();
         if (conn) server.serve(std::move(*conn));
@@ -96,7 +91,7 @@ TEST(CraftTcp, CommitFrontierAdvances) {
     ASSERT_TRUE(lst.has_value());
     uint16_t const port = lst->port();
 
-    craft_tcp_server server{make_geo()};
+    craft_tcp_server server{g_max_tx, make_geo()};
     std::jthread srv([&] {
         auto conn = lst->accept();
         if (conn) server.serve(std::move(*conn));
@@ -138,7 +133,7 @@ TEST(CraftTcp, LoginLogoutRoundTrip) {
     ASSERT_TRUE(lst.has_value());
     uint16_t const port = lst->port();
 
-    craft_tcp_server server{make_geo()};
+    craft_tcp_server server{g_max_tx, make_geo()};
     std::jthread srv([&] {
         auto conn = lst->accept();
         if (conn) server.serve(std::move(*conn));

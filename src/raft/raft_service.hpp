@@ -6,7 +6,6 @@
 #include <stdexec/execution.hpp>
 #include <tuple>
 #include <nuraft_mesg/nuraft_mesg.hpp>
-#include <craft/wire.hpp>
 #include <craft/client.hpp> // result types
 
 namespace nuraft_mesg {
@@ -16,6 +15,8 @@ class manager;
 using consensus_handle = std::shared_ptr< nuraft_mesg::manager >;
 
 namespace craft {
+
+class raft_state_mgr;
 
 // Process-wide bridge for the peer-to-peer consensus engine used by the TCP server and replica-side code.
 // The concrete nuraft_mesg::manager instance is installed once and then shared by anyone that needs to create
@@ -29,7 +30,8 @@ public:
     consensus_handle get_consensus();
     void start_raft_service(boost::uuids::uuid const& server_uuid);
     result< void > srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                     std::vector< wire::member > const& members);
+                                     std::vector< replica_endpoint > const& members);
+    bool is_leader(nuraft_mesg::group_id_t const& group_id);
 
     // messaging_application overrides
     std::string lookup_peer(nuraft_mesg::peer_id_t const&) override;
@@ -42,6 +44,11 @@ private:
     nuraft_mesg::peer_id_t server_uuid_;
     std::once_flag raft_started_;
     nlohmann::json server_config_;
+    std::shared_mutex mu_;
+    std::map< nuraft_mesg::group_id_t, std::shared_ptr< raft_state_mgr > > state_mgrs_;
+
+    result< std::shared_ptr< raft_state_mgr > > get_state_mgr(nuraft_mesg::group_id_t const& group_id);
+    void add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::shared_ptr< raft_state_mgr > mgr);
 };
 
 } // namespace craft

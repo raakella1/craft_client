@@ -34,21 +34,14 @@
 
 namespace craft {
 class MemCraftReplica; // the server's state backing (pimpl; included only in craft_tcp_server.cpp)
+struct server_geometry;
 }
 
 namespace craft::net {
 
-// The server's per-volume geometry -- what LOGIN advertises; the replica's journal/index is built from it.
-struct server_geometry {
-    uint64_t capacity = 0;
-    uint32_t lba_size = 0;
-    uint32_t max_tx = 0;
-    std::vector< wire::member > members; // members[0] is this replica (its id + addr)
-};
-
 class craft_tcp_server {
 public:
-    explicit craft_tcp_server(server_geometry geo, std::string const& server_config_file = {});
+    explicit craft_tcp_server(uint32_t max_tx, server_geometry geo, std::string const& server_config_file = {});
     ~craft_tcp_server();
     craft_tcp_server(craft_tcp_server&&) = default;
     craft_tcp_server& operator=(craft_tcp_server&&) = default;
@@ -64,7 +57,7 @@ public:
     void log_stats() const;
 
 private:
-    server_geometry geo_;
+    uint32_t max_tx_;
     std::shared_ptr< MemCraftReplica > replica_; // the real state; driven via its srv_* local-server seam
     uint64_t next_term_ = 0;                     // monotonic term source; a fresh LOGIN takes ++next_term_
     uint64_t session_term_ = 0;                  // the current session's term, stamped on every IO
