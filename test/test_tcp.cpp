@@ -39,11 +39,12 @@ namespace wire = craft::wire;
 namespace {
 
 constexpr uint32_t k_lba = 4096;
-constexpr uint32_t g_max_tx = 512 * 1024;
 
 craft::server_geometry make_geo() {
-    return craft::server_geometry{
-        .capacity = uint64_t{1} << 30, .lba_size = k_lba, .ep = {.id = boost::uuids::uuid{}, .addr = "127.0.0.1:0"}};
+    return craft::server_geometry{.capacity = uint64_t{1} << 30,
+                                  .lba_size = k_lba,
+                                  .ep = {.id = boost::uuids::uuid{}, .addr = "127.0.0.1:0"},
+                                  .max_tx = 512 * 1024};
 }
 
 // A per-byte-nonzero pattern of `n` bytes -- nonzero so no 4 KiB page collapses to a hole on the read path
@@ -64,7 +65,7 @@ void with_session(F&& body) {
     ASSERT_TRUE(lst.has_value());
     uint16_t const port = lst->port();
 
-    craft_tcp_server server{g_max_tx, make_geo()};
+    craft_tcp_server server{make_geo()};
     std::jthread srv([&] {
         auto conn = lst->accept();
         if (conn) server.serve(std::move(*conn));
@@ -91,7 +92,7 @@ TEST(CraftTcp, CommitFrontierAdvances) {
     ASSERT_TRUE(lst.has_value());
     uint16_t const port = lst->port();
 
-    craft_tcp_server server{g_max_tx, make_geo()};
+    craft_tcp_server server{make_geo()};
     std::jthread srv([&] {
         auto conn = lst->accept();
         if (conn) server.serve(std::move(*conn));
@@ -133,7 +134,7 @@ TEST(CraftTcp, LoginLogoutRoundTrip) {
     ASSERT_TRUE(lst.has_value());
     uint16_t const port = lst->port();
 
-    craft_tcp_server server{g_max_tx, make_geo()};
+    craft_tcp_server server{make_geo()};
     std::jthread srv([&] {
         auto conn = lst->accept();
         if (conn) server.serve(std::move(*conn));

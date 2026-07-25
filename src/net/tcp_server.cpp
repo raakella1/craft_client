@@ -39,8 +39,7 @@ std::span< uint8_t const > as_bytes(T const& v) {
 }
 } // namespace
 
-craft_tcp_server::craft_tcp_server(uint32_t max_tx, server_geometry geo, std::string const& server_config_file) :
-        max_tx_{max_tx} {
+craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& server_config_file) : max_tx_{geo.max_tx} {
     // net == nullptr: this replica serves exclusively through its srv_* seam (the TCP frontend IS the wire).
     // start replica service and raft service if server_config_file is provided
     if (!server_config_file.empty()) {
@@ -125,12 +124,18 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
         return;
     }
     auto const srv_rsp = result.value();
+    if (!srv_rsp.leader_hint.is_nil()) {
+        wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::not_leader),
+                            req.hdr.request_id, {}, {});
+        conn.send_all(out);
+        return;
+    }
     wire::login_rsp rsp{};
     rsp.term = srv_rsp.term;
-    rsp.dlsn = srv_rsp.dlsn;
-    rsp.capacity = srv_rsp.geo.capacity;
-    rsp.lba_size = srv_rsp.geo.lba_size;
-    rsp.max_tx = max_tx_;
+    rsp.dlsn = srv_rsp.dLSN;
+    rsp.capacity = srv_rsp.capacity;
+    rsp.lba_size = srv_rsp.lba_size;
+    rsp.max_tx = srv_rsp.max_tx;
     rsp.member_count = static_cast< uint32_t >(srv_rsp.members.size());
 
     std::vector< uint8_t > body;

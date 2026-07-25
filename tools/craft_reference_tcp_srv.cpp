@@ -113,8 +113,9 @@ int main(int argc, char** argv) {
     auto geo =
         craft::server_geometry{.capacity = capacity,
                                .lba_size = lba_size,
-                               .ep = craft::replica_endpoint{.id = id, .addr = fmt::format("127.0.0.1:{}", port)}};
-    craft::net::craft_tcp_server server{max_tx, std::move(geo), server_config_file};
+                               .ep = craft::replica_endpoint{.id = id, .addr = fmt::format("127.0.0.1:{}", port)},
+                               .max_tx = max_tx};
+    craft::net::craft_tcp_server server{std::move(geo), server_config_file};
 
     // sigaction WITHOUT SA_RESTART: glibc's signal() sets SA_RESTART, which auto-restarts the blocking accept()
     // after the handler runs, so the loop would never re-check g_stop and Ctrl-C could not stop the server. With

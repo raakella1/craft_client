@@ -7,6 +7,7 @@
 #include <tuple>
 #include <nuraft_mesg/nuraft_mesg.hpp>
 #include <craft/client.hpp> // result types
+#include "raft_state_machine.hpp"
 
 namespace nuraft_mesg {
 class manager;
@@ -30,8 +31,13 @@ public:
     consensus_handle get_consensus();
     void start_raft_service(boost::uuids::uuid const& server_uuid);
     result< void > srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                     std::vector< replica_endpoint > const& members);
+                                     std::vector< replica_endpoint > const& members, raft_commit_cb_t cb);
     bool is_leader(nuraft_mesg::group_id_t const& group_id);
+    nuraft_mesg::peer_id_t leader_id(nuraft_mesg::group_id_t const& group_id);
+
+    // raft append entrues
+    template < typename MsgT >
+    result< void > propose(boost::uuids::uuid const& group_id, MsgT const& payload);
 
     // messaging_application overrides
     std::string lookup_peer(nuraft_mesg::peer_id_t const&) override;
@@ -46,9 +52,12 @@ private:
     nlohmann::json server_config_;
     std::shared_mutex mu_;
     std::map< nuraft_mesg::group_id_t, std::shared_ptr< raft_state_mgr > > state_mgrs_;
+    std::map< nuraft_mesg::group_id_t, raft_commit_cb_t > commit_cbs_;
 
     result< std::shared_ptr< raft_state_mgr > > get_state_mgr(nuraft_mesg::group_id_t const& group_id);
     void add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::shared_ptr< raft_state_mgr > mgr);
+    result< raft_commit_cb_t > get_commit_cb(nuraft_mesg::group_id_t const& group_id);
+    void add_commit_cb(nuraft_mesg::group_id_t const& group_id, raft_commit_cb_t cb);
 };
 
 } // namespace craft
