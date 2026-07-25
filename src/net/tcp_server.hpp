@@ -41,7 +41,7 @@ namespace craft::net {
 
 class craft_tcp_server {
 public:
-    explicit craft_tcp_server(uint32_t max_tx, server_geometry geo, std::string const& server_config_file = {});
+    explicit craft_tcp_server(server_geometry geo, std::string const& server_config_file = {});
     ~craft_tcp_server();
     craft_tcp_server(craft_tcp_server&&) = default;
     craft_tcp_server& operator=(craft_tcp_server&&) = default;

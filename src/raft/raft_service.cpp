@@ -15,6 +15,14 @@ namespace {
 auto fail(craft_error e) { return std::unexpected(make_error_condition(e)); }
 } // namespace
 
+static nuraft::ptr< nuraft::buffer > create_message(nlohmann::json const& j_obj) {
+    auto v_msgpack = nlohmann::json::to_msgpack(j_obj);
+    auto buf = nuraft::buffer::alloc(v_msgpack.size() + sizeof(int32_t));
+    buf->put(&v_msgpack[0], v_msgpack.size());
+    buf->pos(0);
+    return buf;
+}
+
 std::shared_ptr< raft_service > raft_service::instance() {
     static std::shared_ptr< raft_service > instance{new raft_service()};
     return instance;
@@ -40,7 +48,7 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
 }
 
 result< void > raft_service::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                               std::vector< replica_endpoint > const& members) {
+                                               std::vector< replica_endpoint > const& members, raft_commit_cb_t cb) {
     auto const group_id = craft::to_uuid(volume_id);
     auto consensus = raft_service::instance()->get_consensus();
 
@@ -63,6 +71,7 @@ result< void > raft_service::srv_create_volume(std::array< uint8_t, 16 > const& 
             return fail(craft_error::INTERNAL);
         }
     }
+    add_commit_cb(group_id, cb);
     return {};
 }
 
@@ -82,7 +91,8 @@ std::shared_ptr< nuraft_mesg::mesg_state_mgr > raft_service::create_state_mgr(in
         return result.value();
     }
     LOGINFO("Creating RAFT state manager for server_id={} group_id={}", srv_id, boost::uuids::to_string(group_id));
-    auto mgr = std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id);
+    auto const r = get_commit_cb(group_id);
+    auto mgr = std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id, (r ? r.value() : nullptr));
     add_state_mgr(group_id, mgr);
     return mgr;
 }
@@ -99,6 +109,18 @@ void raft_service::add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::s
     state_mgrs_[group_id] = std::move(mgr);
 }
 
+result< raft_commit_cb_t > raft_service::get_commit_cb(nuraft_mesg::group_id_t const& group_id) {
+    std::shared_lock< std::shared_mutex > g{mu_};
+    auto const it = commit_cbs_.find(group_id);
+    if (it == commit_cbs_.end()) return fail(craft_error::INTERNAL);
+    return it->second;
+}
+
+void raft_service::add_commit_cb(nuraft_mesg::group_id_t const& group_id, raft_commit_cb_t cb) {
+    std::lock_guard< std::shared_mutex > g{mu_};
+    commit_cbs_.emplace(group_id, std::move(cb));
+}
+
 bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
     auto const state_mgr = get_state_mgr(group_id);
     if (!state_mgr) {
@@ -108,5 +130,43 @@ bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
     auto* raft_ctx = state_mgr.value()->repl_ctx();
     return raft_ctx && raft_ctx->is_raft_leader();
 }
+
+nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& group_id) {
+    auto const state_mgr = get_state_mgr(group_id);
+    if (!state_mgr) {
+        LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
+        return {};
+    }
+    auto* raft_ctx = state_mgr.value()->repl_ctx();
+    if (!raft_ctx) {
+        LOGWARN("No leader for the raft group {}", group_id);
+        return {};
+    }
+    return boost::uuids::string_generator()(raft_ctx->raft_leader_id());
+}
+
+template < typename MsgT >
+result< void > raft_service::propose(boost::uuids::uuid const& group_id, MsgT const& payload) {
+    auto const state_mgr = get_state_mgr(group_id);
+    if (!state_mgr) {
+        LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
+        return std::unexpected(make_error_condition(craft_error::INTERNAL));
+    }
+    auto* raft_ctx = state_mgr.value()->repl_ctx();
+    if (!raft_ctx) {
+        LOGWARN("RAFT state manager context for group_id={} not found", boost::uuids::to_string(group_id));
+        return std::unexpected(make_error_condition(craft_error::INTERNAL));
+    }
+
+    auto const append_status = raft_ctx->raft_server()->append_entries({create_message(nlohmann::json(payload))});
+    if (append_status && !append_status->get_accepted()) {
+        return std::unexpected(nuraft_mesg::to_condition(append_status->get_result_code()));
+    }
+    return {};
+}
+
+template result< void > raft_service::propose< SyncRSCommitLSNMsg >(boost::uuids::uuid const&,
+                                                                    SyncRSCommitLSNMsg const&);
+template result< void > raft_service::propose< InternalLoginMsg >(boost::uuids::uuid const&, InternalLoginMsg const&);
 
 } // namespace craft

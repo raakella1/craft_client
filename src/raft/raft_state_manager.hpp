@@ -2,12 +2,16 @@
 
 #include <nuraft_mesg/mesg_state_mgr.hpp>
 #include <sisl/logging/logging.h>
+#include "raft_state_machine.hpp"
 
 namespace craft {
 
+class raft_service;
+
 class raft_state_mgr : public nuraft_mesg::mesg_state_mgr {
 public:
-    raft_state_mgr(int32_t srv_id, nuraft_mesg::peer_id_t const& srv_addr, nuraft_mesg::group_id_t const& group_id);
+    raft_state_mgr(int32_t srv_id, nuraft_mesg::peer_id_t const& srv_addr, nuraft_mesg::group_id_t const& group_id,
+                   raft_commit_cb_t cb);
 
     nuraft::ptr< nuraft::cluster_config > load_config() override;
     void save_config(const nuraft::cluster_config& config) override;
@@ -27,6 +31,7 @@ private:
     int32_t const _srv_id;
     std::string const _srv_addr;
     std::string const _group_id;
+    raft_commit_cb_t _commit_cb; // temp storage, will be passed on to state machine
 };
 
 }

@@ -1,11 +1,9 @@
 #include "raft_state_manager.hpp"
-#include "raft_state_machine.hpp"
 
 #include <fstream>
 #include <system_error>
 
 #include <nlohmann/json.hpp>
-
 #include "in_memory_log_store.hpp"
 #include "helper.hpp"
 
@@ -61,8 +59,12 @@ nuraft::ptr< nuraft::cluster_config > fromClusterConfig(json const& cluster_conf
 }
 
 raft_state_mgr::raft_state_mgr(int32_t srv_id, nuraft_mesg::peer_id_t const& srv_addr,
-                                   nuraft_mesg::group_id_t const& group_id) :
-        nuraft_mesg::mesg_state_mgr(), _srv_id(srv_id), _srv_addr(to_string(srv_addr)), _group_id(to_string(group_id)) {}
+                               nuraft_mesg::group_id_t const& group_id, raft_commit_cb_t cb) :
+        nuraft_mesg::mesg_state_mgr(),
+        _srv_id(srv_id),
+        _srv_addr(to_string(srv_addr)),
+        _group_id(to_string(group_id)),
+        _commit_cb(std::move(cb)) {}
 
 nuraft::ptr< nuraft::cluster_config > raft_state_mgr::load_config() {
     LOGDEBUG("Loading config for [{}]", _group_id);
@@ -116,7 +118,7 @@ void raft_state_mgr::save_state(const nuraft::srv_state& state) {
 uint32_t raft_state_mgr::get_logstore_id() const { return 0; }
 
 std::shared_ptr< nuraft::state_machine > raft_state_mgr::get_state_machine() {
-    return std::make_shared< echo_state_machine >();
+    return std::make_shared< echo_state_machine >(std::move(_commit_cb));
 }
 
 void raft_state_mgr::permanent_destroy() {}

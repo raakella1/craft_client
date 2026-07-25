@@ -108,14 +108,7 @@ struct server_geometry {
     uint64_t capacity;
     uint32_t lba_size;
     replica_endpoint ep;
-};
-
-// login resp passed to tcp layer
-struct login_establish_result {
-    server_geometry geo;
-    uint64_t term;
-    int64_t dlsn;
-    std::vector< replica_endpoint > members;
+    uint32_t max_tx;
 };
 
 // enable_shared_from_this: a write the transport timed out is delivered late, from the transport's timer
@@ -207,7 +200,7 @@ public:
     // The standalone (one-process = one-replica) resolution round: itself lacking a slot IS the quorum-lacks
     // evidence at N=1, so every hole <= upto is verdicted Empty and the frontier advances through it.
     result< resolution_result > srv_resolve(client_hdr hdr, int64_t upto) { return do_resolve_local(hdr, upto); }
-    result< login_establish_result > srv_establish(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token) {
+    result< LoginResult > srv_establish(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token) {
         return apply_login(volume_id, client_token);
     }
     void srv_end() { cold_apply_logout(); }
@@ -287,13 +280,20 @@ private:
     void cold_truncate_above(int64_t rs_commit_lsn);
 
     // real hooks using raft channel
-    // void apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
-    result< login_establish_result > apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token);
+    void apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
+    result< LoginResult > apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token);
     // void apply_logout();
     // void apply_truncate_above(int64_t rs_commit_lsn);
 
-    // Misc
+    // Misc helpers
     void init_faults();
+    MemJournalSlot to_mem_journal_slot(JournalSlot const& j, uint64_t term);
+    std::vector< int64_t > get_missing_slots(int64_t watermark);
+    int64_t resolve_and_apply(boost::uuids::uuid const& vol_uuid, int64_t watermark, uint64_t client_token,
+                              uint64_t term);
+    result< void > sync_rs_commit_lsn(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn, uint64_t client_token,
+                                      uint64_t term);
+
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.
     std::optional< MemJournalSlot > peek_slot(int64_t dlsn); // copy of the slot, or nullopt if absent
