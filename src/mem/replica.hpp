@@ -200,8 +200,9 @@ public:
     // The standalone (one-process = one-replica) resolution round: itself lacking a slot IS the quorum-lacks
     // evidence at N=1, so every hole <= upto is verdicted Empty and the frontier advances through it.
     result< resolution_result > srv_resolve(client_hdr hdr, int64_t upto) { return do_resolve_local(hdr, upto); }
-    result< LoginResult > srv_establish(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token) {
-        return apply_login(volume_id, client_token);
+    result< LoginResult > srv_establish(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token,
+                                        uint64_t term) {
+        return apply_login(volume_id, client_token, term);
     }
     void srv_end() { cold_apply_logout(); }
     lsn_pair srv_lsns() { return peek_lsns(); }
@@ -281,7 +282,7 @@ private:
 
     // real hooks using raft channel
     void apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
-    result< LoginResult > apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token);
+    result< LoginResult > apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term);
     // void apply_logout();
     // void apply_truncate_above(int64_t rs_commit_lsn);
 

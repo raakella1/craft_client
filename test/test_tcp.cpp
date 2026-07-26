@@ -41,9 +41,11 @@ namespace {
 constexpr uint32_t k_lba = 4096;
 
 craft::server_geometry make_geo() {
+    boost::uuids::uuid ep_id{};
+    ep_id.data[0] = 0x01;
     return craft::server_geometry{.capacity = uint64_t{1} << 30,
                                   .lba_size = k_lba,
-                                  .ep = {.id = boost::uuids::uuid{}, .addr = "127.0.0.1:0"},
+                                  .ep = {.id = ep_id, .addr = "127.0.0.1:0"},
                                   .max_tx = 512 * 1024};
 }
 

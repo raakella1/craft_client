@@ -110,13 +110,18 @@ void craft_tcp_server::serve(craft_conn conn) {
 }
 
 void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
-    // login_req names the volume; this standalone reference server fronts exactly one, so any presented id is
-    // accepted (like its fake HELO cold path). A multi-volume server routes the session-establishment by it.
-
+    // session_active_ is stoll maintained here, change it once we support multi volume
     std::vector< uint8_t > out;
-
+    if (session_active_) {
+        wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::not_eligible),
+                            req.hdr.request_id, {}, {});
+        conn.send_all(out);
+        return;
+    }
+    session_term_ = ++next_term_; // a fresh session term, established (and fenced) on this connection
+    session_active_ = true;
     auto const lr = wire::decode< wire::login_req >(req.op_header);
-    auto result = replica_->srv_establish(lr.volume_id, lr.client_token);
+    auto result = replica_->srv_establish(lr.volume_id, lr.client_token, session_term_);
     if (!result) {
         wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(to_wire_status(result.error())),
                             req.hdr.request_id, {}, {});

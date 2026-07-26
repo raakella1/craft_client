@@ -28,6 +28,7 @@ public:
 
     virtual ~raft_service() = default;
     static std::shared_ptr< raft_service > instance();
+    bool is_raft_enabled() { return consensus_ != nullptr; }
     consensus_handle get_consensus();
     void start_raft_service(boost::uuids::uuid const& server_uuid);
     result< void > srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
