@@ -37,7 +37,7 @@ public:
     // wire-plane peer client: lazily connect-and-cache a CraftTcpPeer for this id.
     std::shared_ptr< net::CraftTcpPeer > get_peer_client(boost::uuids::uuid const& id);
     std::optional< replica_info > get(boost::uuids::uuid const& id) const;
-    void register_volume(std::array< uint8_t, 16 > const& volume_id, std::vector< replica_endpoint > const& members);
+    void register_volume(boost::uuids::uuid const& vol_uuid, std::vector< replica_endpoint > const& members);
     std::vector< replica_info > get_volume(boost::uuids::uuid const& volume_id);
 
 private:

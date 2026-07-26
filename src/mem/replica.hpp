@@ -111,6 +111,12 @@ struct server_geometry {
     uint32_t max_tx;
 };
 
+// for srv helo validation
+struct session_info {
+    uint64_t term;
+    uint64_t client_token;
+};
+
 // enable_shared_from_this: a write the transport timed out is delivered late, from the transport's timer
 // thread. That closure must hold a WEAK reference here (a strong one would cycle: replica -> net_ -> closure
 // -> replica), so the replica must be reachable as a shared_ptr. It always is; make_mem_replica_group is the
@@ -213,6 +219,7 @@ public:
         return do_get_rs_commit_lsn(term, is_login);
     }
     result< std::vector< JournalSlot > > srv_fetch_data(std::vector< int64_t > const& lsns) { return do_fetch(lsns); }
+    session_info srv_session_info(std::array< uint8_t, 16 > const& volume_id) const;
 
 private:
     friend class MemTransport; // the cold path drives the cold_* / peek helpers below directly, and the IO
@@ -281,7 +288,8 @@ private:
     void cold_truncate_above(int64_t rs_commit_lsn);
 
     // real hooks using raft channel
-    void apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
+    void apply_sync(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn, uint64_t client_token,
+                    std::vector< int64_t > const& empty_slots);
     result< LoginResult > apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term);
     // void apply_logout();
     // void apply_truncate_above(int64_t rs_commit_lsn);
@@ -290,8 +298,8 @@ private:
     void init_faults();
     MemJournalSlot to_mem_journal_slot(JournalSlot const& j, uint64_t term);
     std::vector< int64_t > get_missing_slots(int64_t watermark);
-    int64_t resolve_and_apply(boost::uuids::uuid const& vol_uuid, int64_t watermark, uint64_t client_token,
-                              uint64_t term);
+    std::pair< std::vector< int64_t >, int64_t >
+    resolve_and_apply(boost::uuids::uuid const& vol_uuid, int64_t watermark, uint64_t client_token, uint64_t term);
     result< void > sync_rs_commit_lsn(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn, uint64_t client_token,
                                       uint64_t term);
 

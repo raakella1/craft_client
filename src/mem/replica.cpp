@@ -567,8 +567,9 @@ std::vector< int64_t > MemCraftReplica::get_missing_slots(int64_t watermark) {
     return missing;
 }
 
-int64_t MemCraftReplica::resolve_and_apply(boost::uuids::uuid const& vol_uuid, int64_t watermark, uint64_t client_token,
-                                           uint64_t term) {
+std::pair< std::vector< int64_t >, int64_t > MemCraftReplica::resolve_and_apply(boost::uuids::uuid const& vol_uuid,
+                                                                                int64_t watermark,
+                                                                                uint64_t client_token, uint64_t term) {
     auto const peers = replica_manager::instance()->get_volume(vol_uuid);
     auto const missing_lsns = get_missing_slots(watermark);
 
@@ -584,8 +585,8 @@ int64_t MemCraftReplica::resolve_and_apply(boost::uuids::uuid const& vol_uuid, i
 
     // Step 2: for each requested lsn, look across every response and decide its fate.
     int64_t stalled_lsn{-1};
+    std::vector< int64_t > empty_slots;
     for (auto lsn : missing_lsns) {
-        JournalSlot const* found = nullptr;
         uint32_t missing = 0;
         bool is_data{false};
 
@@ -602,24 +603,28 @@ int64_t MemCraftReplica::resolve_and_apply(boost::uuids::uuid const& vol_uuid, i
             }
         }
 
-        if (missing > peers.size() / 2) {
+        if (missing >= peers.size() / 2) {
             cold_mark_empty(lsn); // adopt an already-committed verdict
+            empty_slots.push_back(lsn);
         } else if (!is_data) {
             // unresolved lsn
             stalled_lsn = (stalled_lsn == -1) ? lsn : std::min(lsn, stalled_lsn);
         }
     }
-    return stalled_lsn;
+    return {empty_slots, stalled_lsn};
 }
 
 result< void > MemCraftReplica::sync_rs_commit_lsn(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn,
                                                    uint64_t client_token, uint64_t term) {
-    if (auto const stalled = resolve_and_apply(vol_uuid, rs_commit_lsn, client_token, term); stalled != -1) {
+    auto const [empty_slots, stalled_lsn] = resolve_and_apply(vol_uuid, rs_commit_lsn, client_token, term);
+    if (stalled_lsn != -1) {
         // leader could not resolve all the missing lsns
         return std::unexpected(make_error_condition(craft_error::INTERNAL));
     }
-    if (auto const r = raft_service::instance()->propose(
-            vol_uuid, SyncRSCommitLSNMsg{.rs_commit_lsn = rs_commit_lsn, .client_token = client_token});
+    if (auto const r = raft_service::instance()->propose(vol_uuid,
+                                                         SyncRSCommitLSNMsg{.rs_commit_lsn = rs_commit_lsn,
+                                                                            .client_token = client_token,
+                                                                            .empty_slots = std::move(empty_slots)});
         !r) {
         // TODO: any cleanup required?
         return std::unexpected(r.error());
@@ -739,7 +744,8 @@ std::vector< int64_t > MemCraftReplica::peek_empties(int64_t upto) {
 // create peer raft group and add members to it.
 result< void > MemCraftReplica::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
                                                   std::vector< replica_endpoint > const& members) {
-    auto const commit_cb = [this](uint64_t log_idx, nlohmann::json const& j) {
+    auto const vol_uuid = craft::to_uuid(volume_id);
+    auto const commit_cb = [this, vol_uuid](uint64_t log_idx, nlohmann::json const& j) {
         auto const op_val = j.at("op").get< int >();
         switch (static_cast< Operation >(op_val)) {
         case Operation::SyncRSCommitLSN: {
@@ -750,7 +756,7 @@ result< void > MemCraftReplica::srv_create_volume(std::array< uint8_t, 16 > cons
                 LOGERROR("commit[{}]: malformed SyncRSCommitLSN: {}", log_idx, e.what());
                 return;
             }
-            apply_sync(m.rs_commit_lsn, m.client_token);
+            apply_sync(vol_uuid, m.rs_commit_lsn, m.client_token, m.empty_slots);
             break;
         }
         case Operation::InternalLogin: {
@@ -769,11 +775,59 @@ result< void > MemCraftReplica::srv_create_volume(std::array< uint8_t, 16 > cons
             break;
         }
     };
-    auto const r = raft_service::instance()->srv_create_volume(volume_id, members, commit_cb);
-    if (r) { replica_manager::instance()->register_volume(volume_id, members); }
+    auto const r = raft_service::instance()->srv_create_volume(vol_uuid, members, commit_cb);
+    if (r) { replica_manager::instance()->register_volume(vol_uuid, members); }
     return r;
 }
 
-void MemCraftReplica::apply_sync(int64_t rs_commit_lsn, uint64_t client_token) {}
+// Follower-side catch-up on SyncRSCommitLSN apply. Verdicts are already decided by the leader (empty_slots)
+// -- this never decides Empty itself, only obeys the verdict list or fetches real data.
+void MemCraftReplica::apply_sync(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn, uint64_t client_token,
+                                 std::vector< int64_t > const& empty_slots) {
+    // Verdicts first -- permanent no-ops, no fetch needed.
+    for (auto lsn : empty_slots)
+        cold_mark_empty(lsn);
+
+    uint64_t term;
+    {
+        std::lock_guard< std::mutex > g{mu_};
+        term = state_.term;
+    }
+
+    auto missing = get_missing_slots(rs_commit_lsn);
+    auto const peers = replica_manager::instance()->get_volume(vol_uuid);
+    for (auto const& peer : peers) {
+        if (missing.empty()) break;
+        if (peer.id == geo_.ep.id) continue; // don't ask self
+
+        auto r = sisl::async::sync_get(peer.peer_client->fetch_data(missing));
+        if (!r) continue; // unreachable, try next peer
+
+        std::erase_if(missing, [&](int64_t lsn) {
+            auto const it = std::ranges::find_if(*r, [&](auto const& s) { return s.lsn == lsn; });
+            if (it == r->end()) return false; // this peer doesn't have it either
+            if (it->is_empty) {
+                cold_mark_empty(lsn); // a prior verdict this peer already knows about
+            } else {
+                cold_install_slot(lsn, to_mem_journal_slot(*it, term));
+            }
+            return true;
+        });
+    }
+
+    if (!missing.empty()) {
+        LOGERROR("apply_sync[vol={}]: still missing {} slot(s) <= {} after asking all peers; commit_lsn will "
+                "stall until the next SyncRSCommitLSN round -- first missing={}",
+                boost::uuids::to_string(vol_uuid), missing.size(), rs_commit_lsn, missing.front());
+    }
+
+    std::lock_guard< std::mutex > g{mu_};
+    apply_up_to(rs_commit_lsn);
+}
+
+session_info MemCraftReplica::srv_session_info(std::array< uint8_t, 16 > const&) const {
+    std::lock_guard< std::mutex > g{mu_};
+    return {state_.term, state_.client_token};
+}
 
 } // namespace craft
