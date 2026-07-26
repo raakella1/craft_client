@@ -624,29 +624,41 @@ result< void > MemCraftReplica::sync_rs_commit_lsn(boost::uuids::uuid const& vol
     return {};
 }
 
-result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token) {
-    // place holder
+result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token,
+                                                   uint64_t term) {
+    auto raft_service_inst = raft_service::instance();
+    // return cold path if raft service has not started
+    if (!raft_service_inst->is_raft_enabled()) {
+        std::lock_guard< std::mutex > g{mu_};
+        state_.term = term;
+        state_.client_token = client_token;
+        return LoginResult{.members = {geo_.ep},
+                           .dLSN = state_.last_append_lsn,
+                           .term = state_.term,
+                           .lba_size = geo_.lba_size,
+                           .capacity = geo_.capacity,
+                           .max_tx = geo_.max_tx};
+    }
     // Phase 1: collect replica LSN state (non-RAFT broadcast)
     // 1.1: accepted by leader only.
     // TODO: what happens if the leader changes before the login is complete?
     auto vol_uuid = craft::to_uuid(volume_id);
-    auto raft_service_inst = raft_service::instance();
     if (!raft_service_inst->is_leader(vol_uuid)) {
         return LoginResult{{}, -1, 0, 0, 0, raft_service_inst->leader_id(vol_uuid)};
     }
 
     // 1.2 collect replica LSN state (non-RAFT broadcast)
     std::vector< lsn_pair > peer_resp;
-    uint64_t new_term;
+    uint64_t current_term;
     {
         std::lock_guard< std::mutex > g{mu_};
-        new_term = state_.term + 1; // the term in the state is update as part of internal login raft commit
+        current_term = state_.term;
         peer_resp.emplace_back(lsn_pair{state_.commit_lsn, state_.last_append_lsn});
     }
 
     auto const members = replica_manager::instance()->get_volume(vol_uuid);
     for (auto const m : members) {
-        if (auto r = sisl::async::sync_get(m.peer_client->get_rs_commit_lsn(new_term, true /* is_login */)); r) {
+        if (auto r = sisl::async::sync_get(m.peer_client->get_rs_commit_lsn(term, true /* is_login */)); r) {
             peer_resp.emplace_back(r.value());
         }
     }
@@ -658,13 +670,13 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
 
     // Phase 1b: Leader behind - resolve all the missing lsns and
     // Phase 2: SyncRSCommitLSN() via RAFT (data NOT in log)
-    if (auto const r = sync_rs_commit_lsn(vol_uuid, rs_commit_lsn, client_token, new_term - 1); !r) {
+    if (auto const r = sync_rs_commit_lsn(vol_uuid, rs_commit_lsn, client_token, current_term); !r) {
         return std::unexpected(r.error());
     }
 
     // Phase 3: InternalLogin(token, term) via RAFT
     if (auto const r =
-            raft_service_inst->propose(vol_uuid, InternalLoginMsg{.client_token = client_token, .term = new_term});
+            raft_service_inst->propose(vol_uuid, InternalLoginMsg{.client_token = client_token, .term = term});
         !r) {
         // TODO: any cleanup required?
         return std::unexpected(r.error());
@@ -678,7 +690,7 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
     }
     return LoginResult{.members = replicas,
                        .dLSN = rs_commit_lsn,
-                       .term = new_term,
+                       .term = term,
                        .lba_size = geo_.lba_size,
                        .capacity = geo_.capacity,
                        .max_tx = geo_.max_tx};
