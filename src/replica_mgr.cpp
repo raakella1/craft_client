@@ -65,14 +65,14 @@ std::optional< replica_info > replica_manager::get(boost::uuids::uuid const& id)
     return it->second;
 }
 
-void replica_manager::register_volume(std::array< uint8_t, 16 > const& volume_id,
+void replica_manager::register_volume(boost::uuids::uuid const& vol_uuid,
                                       std::vector< replica_endpoint > const& members) {
     std::lock_guard< std::shared_mutex > g{mu_};
     std::vector< replica_info > rinfos;
     for (auto const& m : members) {
         rinfos.emplace_back(replicas_[m.id]);
     }
-    volumes_[craft::to_uuid(volume_id)] = rinfos;
+    volumes_[vol_uuid] = rinfos;
 }
 
 std::vector< replica_info > replica_manager::get_volume(boost::uuids::uuid const& volume_id) {

@@ -158,8 +158,23 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
 
 void craft_tcp_server::on_helo(craft_conn& conn, wire::message const& req) {
     auto const hr = wire::decode< wire::helo_req >(req.op_header);
+
+    // Fence: HELO must present the term + token of the session the replica already knows about.
+    // Only binds this connection if it matches.
+    auto const current = replica_->srv_session_info(hr.volume_id);
+    wire::status code = wire::status::ok;
+
+    bool is_raft_enabled = raft_service::instance()->is_raft_enabled();
+
+    if (is_raft_enabled && (hr.term != current.term || hr.client_token != current.client_token)) {
+        code = wire::status::stale_term;
+    } else {
+        session_term_ = hr.term;
+        session_active_ = true;
+    }
+
     std::vector< uint8_t > out;
-    wire::frame_message(out, wire::op::helo_rsp, static_cast< uint8_t >(wire::status::ok), req.hdr.request_id, {}, {});
+    wire::frame_message(out, wire::op::helo_rsp, static_cast< uint8_t >(code), req.hdr.request_id, {}, {});
     conn.send_all(out);
 }
 

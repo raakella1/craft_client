@@ -47,9 +47,8 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
     });
 }
 
-result< void > raft_service::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
+result< void > raft_service::srv_create_volume(boost::uuids::uuid const& group_id,
                                                std::vector< replica_endpoint > const& members, raft_commit_cb_t cb) {
-    auto const group_id = craft::to_uuid(volume_id);
     auto consensus = raft_service::instance()->get_consensus();
 
     // Seat THIS replica as leader by creating the group.
