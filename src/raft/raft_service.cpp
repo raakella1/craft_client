@@ -38,7 +38,7 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
             .mesg_port_ = my_port,
             .default_group_type_ = default_group_type_,
         };
-        consensus_ = nuraft_mesg::init_messaging(params, weak_from_this(), false /*with_data_svc*/);
+        consensus_ = nuraft_mesg::init_messaging(params, weak_from_this(), true /*with_data_svc*/);
         auto raft_params = nuraft::raft_params{};
         consensus_->register_mgr_type(default_group_type_, raft_params);
         server_uuid_ = server_uuid;

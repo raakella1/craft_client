@@ -70,7 +70,16 @@ void on_signal(int) { g_stop.store(true); }
 
 int main(int argc, char** argv) {
     SISL_OPTIONS_LOAD(argc, argv, SRV_OPTIONS);
-    sisl::logging::SetLogger("craft_reference_tcp_srv");
+    auto id = boost::uuids::random_generator()();
+    if (SISL_OPTIONS.count("server_uuid")) {
+        try {
+            id = boost::uuids::string_generator()(SISL_OPTIONS["server_uuid"].as< std::string >());
+        } catch (std::exception const& e) {
+            std::cerr << "Invalid --server_uuid: " << e.what() << "\n";
+            return 2;
+        }
+    }
+    sisl::logging::SetLogger(fmt::format("craft_tcp_srv_{}", SISL_OPTIONS["server_uuid"].as< std::string >()));
     sisl::logging::SetModuleLogLevel("nuraft_mesg", spdlog::level::info);
     sisl::logging::SetModuleLogLevel("grpc_server", spdlog::level::info);
 
@@ -101,15 +110,6 @@ int main(int argc, char** argv) {
 
     // Advertise this one replica in login_rsp. The id is cosmetic here (the client routes by index, and HELO
     // fences by term, not id) -- a fresh random id is fine; the client's --craft-tcp supplies its own members.
-    auto id = boost::uuids::random_generator()();
-    if (SISL_OPTIONS.count("server_uuid")) {
-        try {
-            id = boost::uuids::string_generator()(SISL_OPTIONS["server_uuid"].as< std::string >());
-        } catch (std::exception const& e) {
-            std::cerr << "Invalid --server_uuid: " << e.what() << "\n";
-            return 2;
-        }
-    }
     auto geo =
         craft::server_geometry{.capacity = capacity,
                                .lba_size = lba_size,
