@@ -302,6 +302,7 @@ private:
     resolve_and_apply(boost::uuids::uuid const& vol_uuid, int64_t watermark, uint64_t client_token, uint64_t term);
     result< void > sync_rs_commit_lsn(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn, uint64_t client_token,
                                       uint64_t term);
+    void internal_login(uint64_t client_token, uint64_t term);
 
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.
@@ -331,6 +332,11 @@ private:
     std::map< int64_t, MemJournalSlot > journal_; // dLSN -> slot (out-of-order arrival tolerated)
     std::map< lba_t, IndexCell > index_;          // applied prefix (<= commit_lsn); an absent LBA is a hole
     mutable std::mutex mu_;
+
+    std::atomic< int64_t > rs_commit_lsn_{-1};
+    std::mutex login_mu_;
+    std::condition_variable login_cv_;
+    bool login_done_{false};
 };
 
 } // namespace craft
