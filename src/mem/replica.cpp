@@ -25,6 +25,7 @@
 #include <cstring>
 #include <iterator>
 #include <system_error>
+#include <chrono>
 
 #include <liburing.h>               // the on-ring data path: SQE prep / user_data
 #include <sisl/async/cqe_state.hpp> // sisl::async::cqe_awaitable + the managed-user_data contract the reap loop shares
@@ -601,7 +602,6 @@ std::pair< std::vector< int64_t >, int64_t > MemCraftReplica::resolve_and_apply(
         }
 
         if (missing >= peers.size() / 2) {
-            cold_mark_empty(lsn); // adopt an already-committed verdict
             empty_slots.push_back(lsn);
         } else if (!is_data) {
             // unresolved lsn
@@ -680,6 +680,10 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
     }
 
     // Phase 3: InternalLogin(token, term) via RAFT
+    {
+        std::lock_guard< std::mutex > lk(login_mu_);
+        login_done_ = false;
+    }
     if (auto const r =
             raft_service_inst->propose(vol_uuid, InternalLoginMsg{.client_token = client_token, .term = term});
         !r) {
@@ -688,7 +692,13 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
     }
 
     // Phase 4: truncate above rs_commit_lsn
-    cold_truncate_above(rs_commit_lsn);
+    // This happens in the internal login commit. Wait until that happens.
+    {
+        std::unique_lock< std::mutex > lk(login_mu_);
+        login_cv_.wait_for(lk, std::chrono::seconds(2), [&] { return login_done_; });
+        if (!login_done_) { return std::unexpected(make_error_condition(craft_error::INTERNAL)); }
+    }
+
     std::vector< replica_endpoint > replicas;
     for (auto const& m : members) {
         replicas.emplace_back(replica_endpoint{.id = m.id, .addr = fmt::format("{}:{}", m.host, m.tcp_port)});
@@ -764,7 +774,7 @@ result< void > MemCraftReplica::srv_create_volume(std::array< uint8_t, 16 > cons
                 LOGERROR("commit[{}]: malformed InternalLogin: {}", log_idx, e.what());
                 return;
             }
-            cold_apply_login(m.client_token, m.term);
+            internal_login(m.client_token, m.term);
             break;
         }
         default:
@@ -820,11 +830,22 @@ void MemCraftReplica::apply_sync(boost::uuids::uuid const& vol_uuid, int64_t rs_
 
     std::lock_guard< std::mutex > g{mu_};
     apply_up_to(rs_commit_lsn);
+    rs_commit_lsn_.store(rs_commit_lsn, std::memory_order_relaxed);
 }
 
 session_info MemCraftReplica::srv_session_info(std::array< uint8_t, 16 > const&) const {
     std::lock_guard< std::mutex > g{mu_};
     return {state_.term, state_.client_token};
+}
+
+void MemCraftReplica::internal_login(uint64_t client_token, uint64_t term) {
+    cold_apply_login(client_token, term);
+    cold_truncate_above(rs_commit_lsn_.load(std::memory_order_relaxed));
+    {
+        std::lock_guard< std::mutex > lk(login_mu_);
+        login_done_ = true;
+    }
+    login_cv_.notify_one();
 }
 
 } // namespace craft
