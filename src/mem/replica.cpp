@@ -651,7 +651,10 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
     // 1.1: accepted by leader only.
     // TODO: what happens if the leader changes before the login is complete?
     auto vol_uuid = craft::to_uuid(volume_id);
+    LOGINFO("Login request, vol id {}, token {}, new session {}", boost::uuids::to_string(vol_uuid), client_token,
+            term);
     if (!raft_service_inst->is_leader(vol_uuid)) {
+        LOGERROR("current replica not a raft leader");
         return LoginResult{{}, -1, 0, 0, 0, raft_service_inst->leader_id(vol_uuid)};
     }
 
@@ -666,6 +669,7 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
 
     auto const members = replica_manager::instance()->get_volume(vol_uuid);
     for (auto const m : members) {
+        if (m.id == geo_.ep.id) { continue; }
         if (auto r = sisl::async::sync_get(m.peer_client->get_rs_commit_lsn(term, true /* is_login */)); r) {
             peer_resp.emplace_back(r.value());
         }

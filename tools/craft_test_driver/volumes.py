@@ -1,7 +1,10 @@
 # volumes.py
 import uuid
+import logging
 
 from craft_wire import create_volume, status_name
+
+logger = logging.getLogger(__name__)
 
 
 class Volume:
@@ -31,7 +34,7 @@ class VolumeRegistry:
 
         status = create_volume(leader["host"], leader["tcp_port"], vol_id, capacity, lba_size, wire_members)
         name = status_name(status)
-        print(f"create_volume({vol_id}) -> status={status} ({name})")
+        logger.info(f"create_volume({vol_id}) -> status={status} ({name})")
         if status != 0:
             raise RuntimeError(f"create_volume failed: {name}")
 

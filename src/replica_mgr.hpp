@@ -30,12 +30,10 @@ class replica_manager {
 public:
     static std::shared_ptr< replica_manager > instance();
 
-    void start_replica_service(std::string const& path);
+    void start_replica_service(std::string const& path, boost::uuids::uuid const& my_uuid);
 
     // raft's messaging_application::lookup_peer bridge: peer_id -> "host:raft_port".
     std::string lookup_peer(boost::uuids::uuid const& id) const;
-    // wire-plane peer client: lazily connect-and-cache a CraftTcpPeer for this id.
-    std::shared_ptr< net::CraftTcpPeer > get_peer_client(boost::uuids::uuid const& id);
     std::optional< replica_info > get(boost::uuids::uuid const& id) const;
     void register_volume(boost::uuids::uuid const& vol_uuid, std::vector< replica_endpoint > const& members);
     std::vector< replica_info > get_volume(boost::uuids::uuid const& volume_id);
@@ -43,6 +41,7 @@ public:
 private:
     replica_manager() = default;
 
+    boost::uuids::uuid id_;
     mutable std::shared_mutex mu_;
     std::map< boost::uuids::uuid, replica_info > replicas_;                  // static, loaded once
     std::map< boost::uuids::uuid, std::vector< replica_info > > volumes_;

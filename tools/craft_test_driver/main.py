@@ -1,20 +1,33 @@
-# main.py
 import argparse
 import json
 import sys
 import time
 import uuid
 from pathlib import Path
+import logging
 
 from cluster import ClusterManager
-from craft_disk import CraftDisk
 from volumes import VolumeRegistry
+from craft_disk import CraftDisk
+import registry
+from test_registry import run_test, TestNotFoundError, list_tests
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(filename)s:%(funcName)s:%(lineno)d] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="CRAFT reference cluster test harness")
-    p.add_argument("--config", required=True, type=Path,
-                    help="server_config.json path (members: uuid, host, raft_port, tcp_port)")
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=Path("server_config.json"),
+        help="server_config.json path (members: uuid, host, raft_port, tcp_port)",
+    )
     p.add_argument("--tcp_srv_binary", default=Path("./craft_reference_tcp_srv"), type=Path,
                     help="path to the craft_reference_tcp_srv executable")
     p.add_argument("--craft_disk_binary", type=Path,
@@ -27,6 +40,9 @@ def parse_args():
     p.add_argument("--lba-size", type=int, default=4096, help="volume block size in bytes")
     p.add_argument("--cleanup", action="store_true",
                     help="kill any craft_reference_tcp_srv / ublkpp_disk processes left over, then exit")
+    p.add_argument("--run-test", action="append", default=[],
+                    help="name of a test to run after attaching (repeatable); see --list-tests")
+    p.add_argument("--list-tests", action="store_true", help="list available tests and exit")
     args = p.parse_args()
     args.tcp_srv_binary = args.tcp_srv_binary.resolve()
     if args.craft_disk_binary:
@@ -49,40 +65,50 @@ def cleanup_stray_processes():
     for name in ("craft_reference_tcp_srv", "ublkpp_disk"):
         result = subprocess.run(["pkill", "-9", "-f", name], capture_output=True)
         if result.returncode == 0:
-            print(f"killed process(es) matching '{name}'")
+            logger.info(f"killed process(es) matching '{name}'")
         elif result.returncode == 1:
-            print(f"no process matching '{name}' found")
+            logger.info(f"no process matching '{name}' found")
         else:
-            print(f"pkill for '{name}' failed: {result.stderr.decode().strip()}", file=sys.stderr)
+            logger.error(f"pkill for '{name}' failed: {result.stderr.decode().strip()}")
 
 
 def run(args, members):
     vol_id = uuid.UUID(args.vol_id) if args.vol_id else None
     cluster = ClusterManager(args.tcp_srv_binary, args.config, members)
+    registry.set_cluster(cluster)
     disk = None
 
     try:
         cluster.start_all()
-        print(f"waiting {args.startup_wait}s for servers to come up...")
+        logger.info(f"waiting {args.startup_wait}s for servers to come up...")
         time.sleep(args.startup_wait)
 
         dead = cluster.any_dead()
         if dead:
             raise RuntimeError(f"servers failed to start: {dead}")
-        print("all server processes alive, proceeding to create_volume")
+        logger.info("all server processes alive, proceeding to create_volume")
 
-        registry = VolumeRegistry()
-        vol = registry.create(members, vol_id=vol_id, capacity=args.capacity, lba_size=args.lba_size)
-        print(f"volume created, waiting {args.startup_wait}s before attaching client...")
+        vol = registry.volumes.create(members, vol_id=vol_id, capacity=args.capacity, lba_size=args.lba_size)
+        logger.info(f"volume created, waiting {args.startup_wait}s before attaching client...")
         time.sleep(args.startup_wait)
 
         if args.craft_disk_binary:
             disk = CraftDisk(args.craft_disk_binary, vol)
             disk.start()
-            print(f"{len(members)} server(s) running, {vol}, disk at {disk.device_path}, "
-                  f"press Ctrl+C to stop")
+            registry.add_disk(str(vol.vol_id), disk)
+            logger.info(f"{len(members)} server(s) running, {vol}, disk at {disk.device_path}, "
+                        f"press Ctrl+C to stop")
         else:
-            print(f"{len(members)} server(s) running, {vol}, press Ctrl+C to stop")
+            logger.info(f"{len(members)} server(s) running, {vol}, press Ctrl+C to stop")
+
+        time.sleep(args.startup_wait)
+        if args.run_test:
+            for name in args.run_test:
+                try:
+                    run_test(name, disk.device_path)
+                except TestNotFoundError as e:
+                    logger.error(str(e))
+                    raise
 
         while True:
             time.sleep(1)
@@ -93,25 +119,29 @@ def run(args, members):
                 raise RuntimeError("ublkpp_disk exited unexpectedly")
 
     except KeyboardInterrupt:
-        print("Ctrl+C -- shutting down...")
+        logger.info("Ctrl+C -- shutting down...")
         if disk is not None:
             disk.stop()
         cluster.shutdown()
 
     except Exception as e:
-        print(f"error: {e}", file=sys.stderr)   
-        print("leaving processes running for inspection. "
-                "PIDs:", file=sys.stderr)
+        logger.error(f"error: {e}")
+        logger.error("leaving processes running for inspection. PIDs:")
         for uuid_, proc in cluster.procs.items():
-            print(f"  server {uuid_}: pid={proc.pid}", file=sys.stderr)
+            logger.error(f"  server {uuid_}: pid={proc.pid}")
         if disk is not None and disk.proc is not None:
-            print(f"  ublkpp_disk: pid={disk.proc.pid}", file=sys.stderr)
-        print("re-run with --cleanup to kill them later.", file=sys.stderr)
+            logger.error(f"  ublkpp_disk: pid={disk.proc.pid}")
+        logger.error("re-run with --cleanup to kill them later.")
         sys.exit(1)
 
 
 def main():
     args = parse_args()
+
+    if args.list_tests:
+        for name in list_tests():
+            print(name)
+        return
 
     if args.cleanup:
         cleanup_stray_processes()

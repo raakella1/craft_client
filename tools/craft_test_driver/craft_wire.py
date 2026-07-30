@@ -1,6 +1,9 @@
 import socket
 import struct
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 MSG_HDR = "<BBHI"  # op(u8) status(u8) request_id(u16) body_len(u32)
@@ -52,12 +55,14 @@ def create_volume(host: str, port: int, volume_id: uuid.UUID, capacity: int,
     try:
         s.sendall(hdr + op_header + body)
         resp_hdr = recv_exact(s, MSG_HDR_SIZE)
-        print(f"create_volume raw response header: {resp_hdr!r}")
+        logger.info(f"create_volume raw response header: {resp_hdr!r}")
         op, status, rid, resp_body_len = struct.unpack(MSG_HDR, resp_hdr)
-        print(f"create_volume decoded: op={op} status={status} request_id={rid} body_len={resp_body_len}")
+        logger.info(
+            f"create_volume decoded: op={op} status={status} request_id={rid} body_len={resp_body_len}"
+        )
         if resp_body_len:
             resp_body = recv_exact(s, resp_body_len)
-            print(f"create_volume response body: {resp_body!r}")
+            logger.info(f"create_volume response body: {resp_body!r}")
         return status
     finally:
         s.close()
