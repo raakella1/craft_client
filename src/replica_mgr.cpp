@@ -14,7 +14,8 @@ std::shared_ptr< replica_manager > replica_manager::instance() {
     return inst;
 }
 
-void replica_manager::start_replica_service(std::string const& path) {
+void replica_manager::start_replica_service(std::string const& path, boost::uuids::uuid const& my_uuid) {
+    id_ = my_uuid;
     std::ifstream istrm(path, std::ios::binary);
     if (!istrm.is_open()) {
         LOGERROR("replica_manager: could not open {}", path);
@@ -31,12 +32,18 @@ void replica_manager::start_replica_service(std::string const& path) {
 
     replicas_.clear();
     for (auto const& m : j.at("members")) {
-        replica_info info;
-        info.id = boost::uuids::string_generator()(m.at("uuid").get< std::string >());
-        info.host = m.at("host").get< std::string >();
-        info.raft_port = m.at("raft_port").get< uint16_t >();
-        info.tcp_port = m.at("tcp_port").get< uint16_t >();
-        replicas_[info.id] = std::move(info);
+        auto const id = boost::uuids::string_generator()(m.at("uuid").get< std::string >());
+        replicas_.emplace(id,
+                          replica_info{
+                              .id = id,
+                              .host = m.at("host").get< std::string >(),
+                              .raft_port = m.at("raft_port").get< uint16_t >(),
+                              .tcp_port = m.at("tcp_port").get< uint16_t >(),
+                              .peer_client = (id == my_uuid)
+                                  ? nullptr
+                                  : std::make_shared< net::CraftTcpPeer >(m.at("host").get< std::string >(),
+                                                                          m.at("tcp_port").get< uint16_t >(), id),
+                          });
     }
 }
 
@@ -45,17 +52,6 @@ std::string replica_manager::lookup_peer(boost::uuids::uuid const& id) const {
     auto const it = replicas_.find(id);
     if (it == replicas_.end()) return {};
     return it->second.host + ":" + std::to_string(it->second.raft_port);
-}
-
-std::shared_ptr< net::CraftTcpPeer > replica_manager::get_peer_client(boost::uuids::uuid const& id) {
-    std::lock_guard< std::shared_mutex > g{mu_};
-
-    auto const rit = replicas_.find(id);
-    if (rit == replicas_.end()) return nullptr;
-    if (!rit->second.peer_client) {
-        rit->second.peer_client = std::make_shared< net::CraftTcpPeer >(rit->second.host, rit->second.tcp_port, id);
-    }
-    return rit->second.peer_client;
 }
 
 std::optional< replica_info > replica_manager::get(boost::uuids::uuid const& id) const {

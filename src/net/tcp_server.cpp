@@ -43,7 +43,7 @@ craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& serve
     // net == nullptr: this replica serves exclusively through its srv_* seam (the TCP frontend IS the wire).
     // start replica service and raft service if server_config_file is provided
     if (!server_config_file.empty()) {
-        replica_manager::instance()->start_replica_service(server_config_file);
+        replica_manager::instance()->start_replica_service(server_config_file, geo.ep.id);
         raft_service::instance()->start_raft_service(geo.ep.id);
     }
     replica_ = std::make_shared< MemCraftReplica >(std::move(geo));
