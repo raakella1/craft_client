@@ -26,9 +26,11 @@
 #include <iterator>
 #include <system_error>
 #include <chrono>
+#include <boost/uuid/string_generator.hpp>
 
 #include <liburing.h>               // the on-ring data path: SQE prep / user_data
 #include <sisl/async/cqe_state.hpp> // sisl::async::cqe_awaitable + the managed-user_data contract the reap loop shares
+#include <sisl/logging/logging.h>
 
 namespace craft {
 
@@ -54,19 +56,64 @@ std::shared_ptr< std::vector< uint8_t > > take_payload(sisl::sg_list const& s) {
 }
 } // namespace
 
-void MemCraftReplica::init_faults() {
+void MemCraftReplica::init() {
     // Publish the initial (healthy) fault snapshot before any IO can read it.
     auto initial = std::make_unique< replica_faults const >();
     faults_.store(initial.get(), std::memory_order_release);
     fault_retired_.push_back(std::move(initial));
+
+    // register raft callbacks
+    auto raft_inst = raft_service::instance();
+    if (!raft_inst->is_raft_enabled()) { return; }
+    auto commit_cb = [this](uint64_t log_idx, nlohmann::json const& j, std::string const& vol_uuid_str) {
+        auto const vol_uuid = boost::uuids::string_generator()(vol_uuid_str);
+        auto const op_val = j.at("op").get< int >();
+        switch (static_cast< Operation >(op_val)) {
+        case Operation::SyncRSCommitLSN: {
+            SyncRSCommitLSNMsg m;
+            try {
+                m = j.get< SyncRSCommitLSNMsg >();
+            } catch (nlohmann::json::exception const& e) {
+                LOGERROR("commit[{}]: malformed SyncRSCommitLSN: {}", log_idx, e.what());
+                return;
+            }
+            LOGDEBUG("commit[{}][vol={}]: applying SyncRSCommitLSN rs_commit_lsn={} empty_slots={}", log_idx,
+                     boost::uuids::to_string(vol_uuid), m.rs_commit_lsn, m.empty_slots.size());
+            apply_sync(vol_uuid, m.rs_commit_lsn, m.client_token, m.empty_slots);
+            break;
+        }
+        case Operation::InternalLogin: {
+            InternalLoginMsg m;
+            try {
+                m = j.get< InternalLoginMsg >();
+            } catch (nlohmann::json::exception const& e) {
+                LOGERROR("commit[{}]: malformed InternalLogin: {}", log_idx, e.what());
+                return;
+            }
+            LOGDEBUG("commit[{}][vol={}]: applying InternalLogin term={} client_token={}", log_idx,
+                     boost::uuids::to_string(vol_uuid), m.term, m.client_token);
+            internal_login(m.client_token, m.term);
+            break;
+        }
+        default:
+            LOGERROR("commit[{}]: unknown op={}", log_idx, op_val);
+            break;
+        }
+    };
+    raft_inst->add_commit_cb(std::move(commit_cb));
 }
 
 MemCraftReplica::MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net) :
         geo_{.lba_size = page_size, .ep = std::move(ep)}, net_{std::move(net)} {
-    init_faults();
+    init();
+    LOGDEBUG("MemCraftReplica constructed [id={}] page_size={}", boost::uuids::to_string(geo_.ep.id), page_size);
 }
 
-MemCraftReplica::MemCraftReplica(server_geometry geo) : geo_{std::move(geo)} { init_faults(); }
+MemCraftReplica::MemCraftReplica(server_geometry geo) : geo_{std::move(geo)} {
+    init();
+    LOGDEBUG("MemCraftReplica constructed [id={}] lba_size={} capacity={}", boost::uuids::to_string(geo_.ep.id),
+             geo_.lba_size, geo_.capacity);
+}
 
 // ── fault injection (COW; readers never block, and a reader holding the old snapshot stays valid) ──
 
@@ -81,15 +128,19 @@ void MemCraftReplica::mutate_faults(Fn&& fn) {
 }
 
 void MemCraftReplica::set_up(bool up) {
+    LOGINFO("fault injection: set_up({}) [id={}]", up, boost::uuids::to_string(geo_.ep.id));
     mutate_faults([&](replica_faults& s) { s.up = up; });
 }
 void MemCraftReplica::set_delay(std::chrono::milliseconds d) {
+    LOGINFO("fault injection: set_delay({}ms) [id={}]", d.count(), boost::uuids::to_string(geo_.ep.id));
     mutate_faults([&](replica_faults& s) { s.delay = (d.count() > 0) ? d : std::chrono::milliseconds{0}; });
 }
 void MemCraftReplica::drop_writes(bool drop) {
+    LOGINFO("fault injection: drop_writes({}) [id={}]", drop, boost::uuids::to_string(geo_.ep.id));
     mutate_faults([&](replica_faults& s) { s.write_ok = !drop; });
 }
 void MemCraftReplica::clear_faults() {
+    LOGINFO("fault injection: clear_faults [id={}]", boost::uuids::to_string(geo_.ep.id));
     mutate_faults([](replica_faults& s) { s = replica_faults{}; });
 }
 bool MemCraftReplica::is_up() const { return fault_snapshot()->up; }
@@ -109,6 +160,7 @@ async_status MemCraftReplica::logout(client_hdr hdr) {
         std::lock_guard< std::mutex > g{mu_};
         if (hdr.term != state_.term) co_return fail(craft_error::STALE_TERM);
     }
+    LOGINFO("logout [id={}] term={}", boost::uuids::to_string(geo_.ep.id), hdr.term);
     co_return net_ ? net_->run_logout(this, hdr.term) : ok();
 }
 // Two data paths behind one interface, chosen by the verb's leading `q`. Null q: every op crosses the wire
@@ -221,6 +273,7 @@ async_result< resolution_result > MemCraftReplica::request_resolution(::io_uring
         std::lock_guard< std::mutex > g{mu_};
         if (hdr.term != state_.term) co_return fail(craft_error::STALE_TERM);
     }
+    LOGDEBUG("request_resolution [id={}] term={} upto={}", boost::uuids::to_string(geo_.ep.id), hdr.term, upto);
     co_return net_->run_resolution(this, hdr.term, upto);
 }
 
@@ -303,6 +356,8 @@ result< lsn_pair > MemCraftReplica::do_get_rs_commit_lsn(uint64_t term, bool is_
 
 status MemCraftReplica::do_truncate(int64_t lsn) {
     std::lock_guard< std::mutex > g{mu_};
+    LOGDEBUG("do_truncate [id={}] above lsn={} (last_append_lsn was {})", boost::uuids::to_string(geo_.ep.id), lsn,
+             state_.last_append_lsn);
     journal_.erase(journal_.upper_bound(lsn), journal_.end());
     state_.last_append_lsn = std::min(state_.last_append_lsn, lsn);
     return ok();
@@ -328,6 +383,7 @@ result< std::vector< JournalSlot > > MemCraftReplica::do_fetch(std::vector< int6
         }
         out.push_back(std::move(js));
     }
+    LOGDEBUG("do_fetch [id={}] requested={} returned={}", boost::uuids::to_string(geo_.ep.id), lsns.size(), out.size());
     return out;
 }
 
@@ -352,6 +408,8 @@ result< resolution_result > MemCraftReplica::do_resolve_local(client_hdr hdr, in
     }
     state_.last_append_lsn = std::max(state_.last_append_lsn, upto);
     apply_up_to(upto);
+    LOGDEBUG("do_resolve_local [id={}] upto={} empty_slots={} commit_lsn now {}", boost::uuids::to_string(geo_.ep.id),
+             upto, out.empty_slots.size(), state_.commit_lsn);
     return out;
 }
 
@@ -523,16 +581,22 @@ void MemCraftReplica::cold_apply_sync(int64_t rs_commit_lsn, uint64_t /*client_t
 }
 void MemCraftReplica::cold_apply_login(uint64_t client_token, uint64_t term) {
     std::lock_guard< std::mutex > g{mu_};
+    LOGDEBUG("cold_apply_login [id={}] client_token={} term={} (was term={})", boost::uuids::to_string(geo_.ep.id),
+             client_token, term, state_.term);
     state_.client_token = client_token;
     state_.term = term;
 }
 void MemCraftReplica::cold_apply_logout() {
     std::lock_guard< std::mutex > g{mu_};
+    LOGINFO("cold_apply_logout [id={}] clearing term={} client_token={}", boost::uuids::to_string(geo_.ep.id),
+            state_.term, state_.client_token);
     state_.client_token = 0;
     state_.term = 0; // no active session; subsequent IOs with old term fail STALE_TERM
 }
 void MemCraftReplica::cold_truncate_above(int64_t rs_commit_lsn) {
     std::lock_guard< std::mutex > g{mu_};
+    LOGDEBUG("cold_truncate_above [id={}] rs_commit_lsn={} (last_append_lsn was {})",
+             boost::uuids::to_string(geo_.ep.id), rs_commit_lsn, state_.last_append_lsn);
     journal_.erase(journal_.upper_bound(rs_commit_lsn), journal_.end());
     state_.last_append_lsn = std::min(state_.last_append_lsn, rs_commit_lsn);
 }
@@ -540,13 +604,19 @@ void MemCraftReplica::cold_truncate_above(int64_t rs_commit_lsn) {
 // ── peer comm hooks (driven by raft) ──
 
 MemCraftReplica::MemJournalSlot MemCraftReplica::to_mem_journal_slot(JournalSlot const& j, uint64_t term) {
+    std::shared_ptr< std::vector< uint8_t > > bytes;
+    if (j.owned_data) {
+        bytes = j.owned_data;
+    } else if (j.data.size > 0) {
+        bytes = take_payload(j.data);
+    }
     return MemJournalSlot{
         .term = term,
         .lba = j.lba,
         .len = j.len,
         .all_zeros = j.all_zeros,
         .is_empty = j.is_empty,
-        .bytes = (j.data.size == 0) ? nullptr : take_payload(j.data),
+        .bytes = std::move(bytes),
     };
 }
 
@@ -562,6 +632,8 @@ std::vector< int64_t > MemCraftReplica::get_missing_slots(int64_t watermark) {
     }
     for (; expect <= watermark; ++expect)
         missing.push_back(expect); // trailing gap after the last present entry
+    LOGDEBUG("get_missing_slots [id={}] watermark={} missing_count={}", boost::uuids::to_string(geo_.ep.id), watermark,
+             missing.size());
     return missing;
 }
 
@@ -570,6 +642,9 @@ std::pair< std::vector< int64_t >, int64_t > MemCraftReplica::resolve_and_apply(
                                                                                 uint64_t client_token, uint64_t term) {
     auto const peers = replica_manager::instance()->get_volume(vol_uuid);
     auto const missing_lsns = get_missing_slots(watermark);
+    LOGDEBUG("resolve_and_apply[vol={}] watermark={} missing={} peers={}", boost::uuids::to_string(vol_uuid), watermark,
+             missing_lsns.size(), peers.size());
+    if (missing_lsns.empty()) { return {{}, -1}; }
 
     // Brute force, no optimizations for now
     // Step 1: ask every peer for the full missing list, collect ALL responses first.
@@ -578,6 +653,9 @@ std::pair< std::vector< int64_t >, int64_t > MemCraftReplica::resolve_and_apply(
         if (peer.id == geo_.ep.id) { continue; }
         if (auto r = sisl::async::sync_get(peer.peer_client->fetch_data(missing_lsns)); r) {
             all_responses.emplace_back(std::move(r.value()));
+        } else {
+            LOGWARN("resolve_and_apply[vol={}]: fetch_data to peer {} failed/unreachable, error: {}",
+                    boost::uuids::to_string(vol_uuid), boost::uuids::to_string(peer.id), r.error().message());
         }
     }
 
@@ -608,6 +686,13 @@ std::pair< std::vector< int64_t >, int64_t > MemCraftReplica::resolve_and_apply(
             stalled_lsn = (stalled_lsn == -1) ? lsn : std::min(lsn, stalled_lsn);
         }
     }
+    if (stalled_lsn != -1) {
+        LOGWARN("resolve_and_apply[vol={}]: could not resolve past lsn={} (quorum-lacks evidence insufficient)",
+                boost::uuids::to_string(vol_uuid), stalled_lsn);
+    } else {
+        LOGDEBUG("resolve_and_apply[vol={}]: fully resolved up to watermark={}, empty_slots={}",
+                 boost::uuids::to_string(vol_uuid), watermark, empty_slots.size());
+    }
     return {empty_slots, stalled_lsn};
 }
 
@@ -616,6 +701,8 @@ result< void > MemCraftReplica::sync_rs_commit_lsn(boost::uuids::uuid const& vol
     auto const [empty_slots, stalled_lsn] = resolve_and_apply(vol_uuid, rs_commit_lsn, client_token, term);
     if (stalled_lsn != -1) {
         // leader could not resolve all the missing lsns
+        LOGERROR("sync_rs_commit_lsn[vol={}]: leader could not resolve all missing lsns, stalled at {}",
+                 boost::uuids::to_string(vol_uuid), stalled_lsn);
         return std::unexpected(make_error_condition(craft_error::INTERNAL));
     }
     if (auto const r = raft_service::instance()->propose(vol_uuid,
@@ -624,8 +711,12 @@ result< void > MemCraftReplica::sync_rs_commit_lsn(boost::uuids::uuid const& vol
                                                                             .empty_slots = std::move(empty_slots)});
         !r) {
         // TODO: any cleanup required?
+        LOGERROR("sync_rs_commit_lsn[vol={}]: propose(SyncRSCommitLSN={}) failed: {}",
+                 boost::uuids::to_string(vol_uuid), rs_commit_lsn, r.error().message());
         return std::unexpected(r.error());
     }
+    LOGINFO("sync_rs_commit_lsn[vol={}]: proposed rs_commit_lsn={} OK", boost::uuids::to_string(vol_uuid),
+            rs_commit_lsn);
     return {};
 }
 
@@ -637,6 +728,8 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
         std::lock_guard< std::mutex > g{mu_};
         state_.term = term;
         state_.client_token = client_token;
+        LOGINFO("apply_login [id={}]: raft disabled, cold-path login OK, term={} token={}",
+                boost::uuids::to_string(geo_.ep.id), term, client_token);
         return LoginResult{.members = {geo_.ep},
                            .dLSN = state_.last_append_lsn,
                            .term = state_.term,
@@ -665,21 +758,35 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
     }
 
     auto const members = replica_manager::instance()->get_volume(vol_uuid);
+    LOGDEBUG("apply_login[vol={}]: polling {} member(s) for GetRSCommitLSN", boost::uuids::to_string(vol_uuid),
+             members.size());
     for (auto const m : members) {
         if (m.id == geo_.ep.id) { continue; }
         if (auto r = sisl::async::sync_get(m.peer_client->get_rs_commit_lsn(term, true /* is_login */)); r) {
+            LOGDEBUG("apply_login[vol={}]: peer {} reported commit_lsn={} last_append_lsn={}",
+                     boost::uuids::to_string(vol_uuid), boost::uuids::to_string(m.id), r->commit_lsn,
+                     r->last_append_lsn);
             peer_resp.emplace_back(r.value());
+        } else {
+            LOGWARN("apply_login[vol={}]: peer {} did not respond to GetRSCommitLSN", boost::uuids::to_string(vol_uuid),
+                    boost::uuids::to_string(m.id));
         }
     }
     // compute watermark as max(quorum.last_append)
     if (peer_resp.size() <= members.size() / 2) {
+        LOGERROR("apply_login[vol={}]: quorum not reached ({} of {} responded)", boost::uuids::to_string(vol_uuid),
+                 peer_resp.size(), members.size());
         return std::unexpected(make_error_condition(craft_error::NO_QUORUM));
     }
     auto const rs_commit_lsn = std::ranges::max_element(peer_resp, {}, &lsn_pair::last_append_lsn)->last_append_lsn;
+    LOGINFO("apply_login[vol={}]: computed rs_commit_lsn={} from {} responder(s)", boost::uuids::to_string(vol_uuid),
+            rs_commit_lsn, peer_resp.size());
 
     // Phase 1b: Leader behind - resolve all the missing lsns and
     // Phase 2: SyncRSCommitLSN() via RAFT (data NOT in log)
     if (auto const r = sync_rs_commit_lsn(vol_uuid, rs_commit_lsn, client_token, current_term); !r) {
+        LOGERROR("apply_login[vol={}]: sync_rs_commit_lsn failed: {}", boost::uuids::to_string(vol_uuid),
+                 r.error().message());
         return std::unexpected(r.error());
     }
 
@@ -692,21 +799,31 @@ result< LoginResult > MemCraftReplica::apply_login(std::array< uint8_t, 16 > con
             raft_service_inst->propose(vol_uuid, InternalLoginMsg{.client_token = client_token, .term = term});
         !r) {
         // TODO: any cleanup required?
+        LOGERROR("apply_login[vol={}]: propose(InternalLogin term={}) failed: {}", boost::uuids::to_string(vol_uuid),
+                 term, r.error().message());
         return std::unexpected(r.error());
     }
+    LOGDEBUG("apply_login[vol={}]: InternalLogin(term={}) proposed, waiting for commit",
+             boost::uuids::to_string(vol_uuid), term);
 
     // Phase 4: truncate above rs_commit_lsn
     // This happens in the internal login commit. Wait until that happens.
     {
         std::unique_lock< std::mutex > lk(login_mu_);
         login_cv_.wait_for(lk, std::chrono::seconds(2), [&] { return login_done_; });
-        if (!login_done_) { return std::unexpected(make_error_condition(craft_error::INTERNAL)); }
+        if (!login_done_) {
+            LOGERROR("apply_login[vol={}]: timed out waiting for InternalLogin(term={}) commit callback",
+                     boost::uuids::to_string(vol_uuid), term);
+            return std::unexpected(make_error_condition(craft_error::INTERNAL));
+        }
     }
 
     std::vector< replica_endpoint > replicas;
     for (auto const& m : members) {
         replicas.emplace_back(replica_endpoint{.id = m.id, .addr = fmt::format("{}:{}", m.host, m.tcp_port)});
     }
+    LOGINFO("apply_login[vol={}]: LOGIN SUCCESS term={} dLSN={} members={}", boost::uuids::to_string(vol_uuid), term,
+            rs_commit_lsn, replicas.size());
     return LoginResult{.members = replicas,
                        .dLSN = rs_commit_lsn,
                        .term = term,
@@ -756,38 +873,15 @@ std::vector< int64_t > MemCraftReplica::peek_empties(int64_t upto) {
 result< void > MemCraftReplica::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
                                                   std::vector< replica_endpoint > const& members) {
     auto const vol_uuid = craft::to_uuid(volume_id);
-    auto const commit_cb = [this, vol_uuid](uint64_t log_idx, nlohmann::json const& j) {
-        auto const op_val = j.at("op").get< int >();
-        switch (static_cast< Operation >(op_val)) {
-        case Operation::SyncRSCommitLSN: {
-            SyncRSCommitLSNMsg m;
-            try {
-                m = j.get< SyncRSCommitLSNMsg >();
-            } catch (nlohmann::json::exception const& e) {
-                LOGERROR("commit[{}]: malformed SyncRSCommitLSN: {}", log_idx, e.what());
-                return;
-            }
-            apply_sync(vol_uuid, m.rs_commit_lsn, m.client_token, m.empty_slots);
-            break;
-        }
-        case Operation::InternalLogin: {
-            InternalLoginMsg m;
-            try {
-                m = j.get< InternalLoginMsg >();
-            } catch (nlohmann::json::exception const& e) {
-                LOGERROR("commit[{}]: malformed InternalLogin: {}", log_idx, e.what());
-                return;
-            }
-            internal_login(m.client_token, m.term);
-            break;
-        }
-        default:
-            LOGERROR("commit[{}]: unknown op={}", log_idx, op_val);
-            break;
-        }
-    };
-    auto const r = raft_service::instance()->srv_create_volume(vol_uuid, members, commit_cb);
-    if (r) { replica_manager::instance()->register_volume(vol_uuid, members); }
+    LOGINFO("srv_create_volume[vol={}]: creating with {} member(s)", boost::uuids::to_string(vol_uuid), members.size());
+
+    auto const r = raft_service::instance()->srv_create_volume(vol_uuid, members);
+    if (r) {
+        replica_manager::instance()->register_volume(vol_uuid, members);
+        LOGINFO("srv_create_volume[vol={}]: SUCCESS", boost::uuids::to_string(vol_uuid));
+    } else {
+        LOGERROR("srv_create_volume[vol={}]: FAILED: {}", boost::uuids::to_string(vol_uuid), r.error().message());
+    }
     return r;
 }
 
@@ -835,6 +929,8 @@ void MemCraftReplica::apply_sync(boost::uuids::uuid const& vol_uuid, int64_t rs_
     std::lock_guard< std::mutex > g{mu_};
     apply_up_to(rs_commit_lsn);
     rs_commit_lsn_.store(rs_commit_lsn, std::memory_order_relaxed);
+    LOGDEBUG("apply_sync[vol={}]: done, commit_lsn now {} (target rs_commit_lsn={})", boost::uuids::to_string(vol_uuid),
+             state_.commit_lsn, rs_commit_lsn);
 }
 
 session_info MemCraftReplica::srv_session_info(std::array< uint8_t, 16 > const&) const {
@@ -850,6 +946,8 @@ void MemCraftReplica::internal_login(uint64_t client_token, uint64_t term) {
         login_done_ = true;
     }
     login_cv_.notify_one();
+    LOGINFO("internal_login [id={}]: InternalLogin COMMITTED term={} client_token={}",
+            boost::uuids::to_string(geo_.ep.id), term, client_token);
 }
 
 } // namespace craft

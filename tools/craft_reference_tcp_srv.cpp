@@ -80,8 +80,10 @@ int main(int argc, char** argv) {
         }
     }
     sisl::logging::SetLogger(fmt::format("craft_tcp_srv_{}", SISL_OPTIONS["server_uuid"].as< std::string >()));
-    sisl::logging::SetModuleLogLevel("nuraft_mesg", spdlog::level::info);
-    sisl::logging::SetModuleLogLevel("grpc_server", spdlog::level::info);
+    std::string const s = SISL_OPTIONS.count("log_mods") ? SISL_OPTIONS["log_mods"].as< std::string >() : "";
+    for (auto const* mod : {"nuraft_mesg", "grpc_server"}) {
+        if (!s.contains(mod)) { sisl::logging::SetModuleLogLevel(mod, spdlog::level::info); }
+    }
 
     auto const port = SISL_OPTIONS["port"].as< uint16_t >();
     if (port == 0) {

@@ -27,8 +27,9 @@ std::error_condition net_to_error(net_error e) {
 }
 } // namespace
 
-CraftTcpPeer::CraftTcpPeer(std::string host, uint16_t port, peer_id_t id, std::chrono::milliseconds op_timeout) :
-        host_{std::move(host)}, port_{port}, id_{id}, op_timeout_{op_timeout} {}
+CraftTcpPeer::CraftTcpPeer(std::string host, uint16_t port, peer_id_t id, uint32_t page_size,
+                           std::chrono::milliseconds op_timeout) :
+        host_{std::move(host)}, port_{port}, id_{id}, page_size_{page_size}, op_timeout_{op_timeout} {}
 
 CraftTcpPeer::~CraftTcpPeer() = default;
 
@@ -74,11 +75,72 @@ async_result< lsn_pair > CraftTcpPeer::get_rs_commit_lsn(uint64_t term, bool is_
     co_return lsn_pair{rsp.commit_lsn, rsp.last_append_lsn};
 }
 
-// ── existing craft_peer methods: not yet implemented over the wire (no opcodes allocated for these yet) ──
-async_result< lsn_pair > CraftTcpPeer::get_lsns() { co_return fail(craft_error::INTERNAL); }
 async_result< std::vector< JournalSlot > > CraftTcpPeer::fetch_data(std::vector< int64_t > lsns) {
-    co_return fail(craft_error::INTERNAL);
+    if (!ensure_connected()) co_return fail(craft_error::REPLICA_DOWN);
+
+    wire::fetch_data_req req{};
+    req.lsn_count = static_cast< uint32_t >(lsns.size());
+    std::vector< uint8_t > body;
+    for (auto lsn : lsns)
+        wire::put(body, lsn);
+
+    std::vector< uint8_t > out;
+    wire::frame_message(out, wire::op::fetch_data, 0, next_request_id(),
+                        {reinterpret_cast< uint8_t const* >(&req), sizeof(req)}, body);
+    if (!conn_.send_all(out)) {
+        connected_ = false;
+        co_return fail(craft_error::REPLICA_DOWN);
+    }
+
+    auto msg = conn_.recv_message(wire::k_default_max_tx);
+    if (!msg) {
+        connected_ = false;
+        co_return std::unexpected(net_to_error(msg.error()));
+    }
+    auto parsed = wire::parse_message(*msg, wire::k_default_max_tx);
+    if (!parsed) {
+        connected_ = false;
+        co_return fail(craft_error::INTERNAL);
+    }
+    if (static_cast< wire::status >(parsed->hdr.status) != wire::status::ok) { co_return fail(craft_error::INTERNAL); }
+
+    auto const rsp = wire::decode< wire::fetch_data_rsp >(parsed->op_header);
+    std::size_t const desc_bytes = static_cast< std::size_t >(rsp.slot_count) * sizeof(wire::fetch_slot_desc);
+    if (parsed->body.size() < desc_bytes) co_return fail(craft_error::INTERNAL);
+
+    std::vector< JournalSlot > out_slots;
+    out_slots.reserve(rsp.slot_count);
+    std::size_t data_off = desc_bytes;
+
+    for (std::size_t i = 0; i < rsp.slot_count; ++i) {
+        auto const sd = wire::decode< wire::fetch_slot_desc >(parsed->body.subspan(i * sizeof(wire::fetch_slot_desc)));
+
+        JournalSlot js;
+        js.lsn = sd.lsn;
+        js.lba = sd.lba;
+        js.len = sd.len;
+        js.is_empty = sd.is_empty != 0;
+        js.all_zeros = sd.all_zeros != 0;
+
+        if (!js.is_empty && !js.all_zeros) {
+            std::size_t const nbytes = static_cast< std::size_t >(sd.len) * page_size_;
+            if (data_off + nbytes > parsed->body.size()) co_return fail(craft_error::INTERNAL);
+
+            js.owned_data = std::make_shared< std::vector< uint8_t > >(parsed->body.begin() + data_off,
+                                                                       parsed->body.begin() + data_off + nbytes);
+            js.data.size = nbytes;
+            js.data.iovs.push_back(iovec{js.owned_data->data(), nbytes});
+
+            data_off += nbytes;
+        }
+        out_slots.push_back(std::move(js));
+    }
+
+    co_return out_slots;
 }
-async_status CraftTcpPeer::truncate(int64_t lsn) { co_return fail(craft_error::INTERNAL); }
+
+// ── existing craft_peer methods: not yet implemented over the wire (no opcodes allocated for these yet) ──
+async_result< lsn_pair > CraftTcpPeer::get_lsns() { co_return fail(craft_error::NOT_IMPLEMENTED); }
+async_status CraftTcpPeer::truncate(int64_t lsn) { co_return fail(craft_error::NOT_IMPLEMENTED); }
 
 } // namespace craft::net

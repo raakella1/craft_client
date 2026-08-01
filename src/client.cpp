@@ -52,7 +52,7 @@ client_hdr craft_client::make_hdr() const {
     // Every IO piggybacks the commit frontier (CRAFT has no standalone commit verb) and the set-wide reclaim
     // floor -- min commit_lsn across members, which the broadcast keep_alive maintains (the login baseline
     // until the first sweep). A replica reclaims journal below min(all_committed_lsn, its own apply frontier).
-    return client_hdr{term_, tracker_->frontier(), route_->all_committed()};
+    return client_hdr{term_, tracker_->frontier(), route_->all_committed(), client_token_};
 }
 
 // Fail fast rather than burn a dLSN on an IO the replicas will reject anyway. They enforce alignment too.
@@ -81,6 +81,7 @@ async_status craft_client::login(uint64_t client_token) {
 
         leader_ = target;
         term_ = lr->term;
+        client_token_ = client_token;
         lba_size_ = lr->lba_size;
         capacity_ = lr->capacity;
         // max_tx is the volume's max DATA transfer (like iSCSI's 512 KiB payload, header excluded). A driver caps
