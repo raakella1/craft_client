@@ -43,6 +43,9 @@ def parse_args():
     p.add_argument("--run-test", action="append", default=[],
                     help="name of a test to run after attaching (repeatable); see --list-tests")
     p.add_argument("--list-tests", action="store_true", help="list available tests and exit")
+    p.add_argument(
+        "--verbose", type=int, default=2, help="2 = info, 1 = debug, 0 = trace"
+    )
     args = p.parse_args()
     args.tcp_srv_binary = args.tcp_srv_binary.resolve()
     if args.craft_disk_binary:
@@ -74,7 +77,7 @@ def cleanup_stray_processes():
 
 def run(args, members):
     vol_id = uuid.UUID(args.vol_id) if args.vol_id else None
-    cluster = ClusterManager(args.tcp_srv_binary, args.config, members)
+    cluster = ClusterManager(args.tcp_srv_binary, args.config, members, args.verbose)
     registry.set_cluster(cluster)
     disk = None
 
@@ -93,7 +96,7 @@ def run(args, members):
         time.sleep(args.startup_wait)
 
         if args.craft_disk_binary:
-            disk = CraftDisk(args.craft_disk_binary, vol)
+            disk = CraftDisk(args.craft_disk_binary, args.config, vol, args.verbose)
             disk.start()
             registry.add_disk(str(vol.vol_id), disk)
             logger.info(f"{len(members)} server(s) running, {vol}, disk at {disk.device_path}, "

@@ -64,6 +64,7 @@ struct client_hdr {
     uint64_t term{0};
     int64_t commit_lsn{-1};
     int64_t all_committed_lsn{-1};
+    uint64_t client_token{0};
 };
 
 // Returned by login(): the replica set, the starting dLSN for new I/O, the session term, and the volume
@@ -129,7 +130,8 @@ ENUM(craft_error, uint16_t,
      WRONG_TOKEN,    // client_token is not the current owner
      NOT_ELIGIBLE,   // replica cannot serve this read (Missing overlap / below login-dLSN L)
      REPLICA_DOWN,   // addressed replica is down (fault injection / unreachable)
-     INTERNAL);      // unexpected internal failure
+     INTERNAL,       // unexpected internal failure
+     NOT_IMPLEMENTED)
 
 class craft_error_category : public std::error_category {
 public:

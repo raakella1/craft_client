@@ -40,11 +40,17 @@ std::span< uint8_t const > as_bytes(T const& v) {
 } // namespace
 
 craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& server_config_file) : max_tx_{geo.max_tx} {
+    LOGINFO("craft_tcp_server: starting [id={}] config_file='{}'", boost::uuids::to_string(geo.ep.id),
+            server_config_file);
     // net == nullptr: this replica serves exclusively through its srv_* seam (the TCP frontend IS the wire).
     // start replica service and raft service if server_config_file is provided
     if (!server_config_file.empty()) {
-        replica_manager::instance()->start_replica_service(server_config_file, geo.ep.id);
+        replica_manager::instance()->start_replica_service(server_config_file, geo.ep.id, geo.lba_size);
         raft_service::instance()->start_raft_service(geo.ep.id);
+        LOGINFO("craft_tcp_server: replica_manager + raft_service started [id={}]", boost::uuids::to_string(geo.ep.id));
+    } else {
+        LOGINFO("craft_tcp_server: no server_config_file given -- running in standalone/cold-path mode [id={}]",
+                boost::uuids::to_string(geo.ep.id));
     }
     replica_ = std::make_shared< MemCraftReplica >(std::move(geo));
 }
@@ -67,11 +73,18 @@ void craft_tcp_server::log_stats() const {
 }
 
 void craft_tcp_server::serve(craft_conn conn) {
+    LOGDEBUG("craft_srv: connection accepted, serving");
     for (;;) {
         auto msg = conn.recv_message(max_tx_);
-        if (!msg) return; // peer closed, or a framing error -- done with this connection
+        if (!msg) {
+            LOGDEBUG("craft_srv: connection closed (peer closed, or framing error)");
+            return; // peer closed, or a framing error -- done with this connection
+        }
         auto parsed = wire::parse_message(*msg, max_tx_);
-        if (!parsed) return;
+        if (!parsed) {
+            LOGWARN("craft_srv: malformed message, resetting connection");
+            return;
+        }
         switch (static_cast< wire::op >(parsed->hdr.op)) {
         case wire::op::login:
             on_login(conn, *parsed);
@@ -104,6 +117,7 @@ void craft_tcp_server::serve(craft_conn conn) {
             on_fetch_data(conn, *parsed);
             break;
         default:
+            LOGWARN("craft_srv: unknown op={}, resetting connection", static_cast< int >(parsed->hdr.op));
             return; // a client sends only request ops we serve; anything else resets the connection
         }
     }
@@ -113,6 +127,8 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
     // session_active_ is stoll maintained here, change it once we support multi volume
     std::vector< uint8_t > out;
     if (session_active_) {
+        LOGWARN("craft_srv LOGIN [rid:{}]: rejected, a session is already active (term={})", req.hdr.request_id,
+                session_term_);
         wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::not_eligible),
                             req.hdr.request_id, {}, {});
         conn.send_all(out);
@@ -121,8 +137,12 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
     session_term_ = ++next_term_; // a fresh session term, established (and fenced) on this connection
     session_active_ = true;
     auto const lr = wire::decode< wire::login_req >(req.op_header);
+    LOGINFO("craft_srv LOGIN [rid:{}]: client_token={} new_term={}", req.hdr.request_id, lr.client_token,
+            session_term_);
     auto result = replica_->srv_establish(lr.volume_id, lr.client_token, session_term_);
     if (!result) {
+        LOGERROR("craft_srv LOGIN [rid:{}]: srv_establish failed: {}", req.hdr.request_id, result.error().message());
+        session_active_ = false; // establish never happened -- don't hold the slot open
         wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(to_wire_status(result.error())),
                             req.hdr.request_id, {}, {});
         conn.send_all(out);
@@ -130,6 +150,9 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
     }
     auto const srv_rsp = result.value();
     if (!srv_rsp.leader_hint.is_nil()) {
+        LOGINFO("craft_srv LOGIN [rid:{}]: NOT_LEADER, redirecting to {}", req.hdr.request_id,
+                boost::uuids::to_string(srv_rsp.leader_hint));
+        session_active_ = false;
         wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::not_leader),
                             req.hdr.request_id, {}, {});
         conn.send_all(out);
@@ -151,6 +174,8 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
         wire::put_member(body, wm);
     }
 
+    LOGINFO("craft_srv LOGIN [rid:{}]: SUCCESS term={} dlsn={} members={}", req.hdr.request_id, rsp.term, rsp.dlsn,
+            rsp.member_count);
     wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::ok), req.hdr.request_id,
                         as_bytes(rsp), body);
     conn.send_all(out);
@@ -167,10 +192,13 @@ void craft_tcp_server::on_helo(craft_conn& conn, wire::message const& req) {
     bool is_raft_enabled = raft_service::instance()->is_raft_enabled();
 
     if (is_raft_enabled && (hr.term != current.term || hr.client_token != current.client_token)) {
+        LOGWARN("craft_srv HELO [rid:{}]: FENCED -- presented term={} token={}, current term={} token={}",
+                req.hdr.request_id, hr.term, hr.client_token, current.term, current.client_token);
         code = wire::status::stale_term;
     } else {
         session_term_ = hr.term;
         session_active_ = true;
+        LOGDEBUG("craft_srv HELO [rid:{}]: bound connection at term={}", req.hdr.request_id, hr.term);
     }
 
     std::vector< uint8_t > out;
@@ -180,9 +208,11 @@ void craft_tcp_server::on_helo(craft_conn& conn, wire::message const& req) {
 
 void craft_tcp_server::on_logout(craft_conn& conn, wire::message const& req) {
     auto st = wire::status::ok;
-    if (!session_active_)
+    if (!session_active_) {
+        LOGWARN("craft_srv LOGOUT [rid:{}]: no active session (already fenced)", req.hdr.request_id);
         st = wire::status::stale_term; // no active session to tear down
-    else {
+    } else {
+        LOGINFO("craft_srv LOGOUT [rid:{}]: term={}", req.hdr.request_id, session_term_);
         session_active_ = false;
         replica_->srv_end(); // clear the replica's term; later IO with the old term now fences STALE_TERM
     }
@@ -289,7 +319,7 @@ void craft_tcp_server::on_resolve(craft_conn& conn, wire::message const& req) {
                 wire::put(body, d);
         }
     }
-    LOGTRACE("craft_srv RS [rid:{}] upto={} status={} empties={}", req.hdr.request_id, rr.upto,
+    LOGDEBUG("craft_srv RS [rid:{}] upto={} status={} empties={}", req.hdr.request_id, rr.upto,
              static_cast< int >(code), rsp.empty_count);
     std::vector< uint8_t > out;
     wire::frame_message(out, wire::op::resolve_rsp, static_cast< uint8_t >(code), req.hdr.request_id, as_bytes(rsp),
@@ -326,6 +356,7 @@ void craft_tcp_server::on_create_volume(craft_conn& conn, wire::message const& r
     LOGINFO("craft_srv CREATE_VOLUME [rid:{}] member_count={}", req.hdr.request_id, cr.member_count);
     wire::status code = wire::status::ok;
     if (!members) {
+        LOGERROR("craft_srv CREATE_VOLUME [rid:{}]: malformed body (member list truncated)", req.hdr.request_id);
         code = wire::status::invalid_argument; // body shorter than member_count implies -- malformed request
     } else {
         std::vector< replica_endpoint > replica_members;
@@ -333,7 +364,11 @@ void craft_tcp_server::on_create_volume(craft_conn& conn, wire::message const& r
             replica_members.emplace_back(replica_endpoint{.id = craft::to_uuid(m.id), .addr = m.addr});
         }
         auto const r = replica_->srv_create_volume(cr.volume_id, replica_members);
-        if (!r) code = to_wire_status(r.error());
+        if (!r) {
+            LOGERROR("craft_srv CREATE_VOLUME [rid:{}]: srv_create_volume failed: {}", req.hdr.request_id,
+                     r.error().message());
+            code = to_wire_status(r.error());
+        }
     }
 
     LOGINFO("craft_srv CREATE_VOLUME [rid:{}] members={} status={}", req.hdr.request_id, cr.member_count,
@@ -351,6 +386,7 @@ void craft_tcp_server::on_get_rs_commit_lsn(craft_conn& conn, wire::message cons
 
     auto const r = replica_->srv_get_rs_commit_lsn(gr.term, gr.is_login != 0);
     if (!r) {
+        LOGWARN("craft_srv GET_RS_COMMIT_LSN [rid:{}]: failed: {}", req.hdr.request_id, r.error().message());
         code = to_wire_status(r.error());
     } else {
         rsp.commit_lsn = r->commit_lsn;
@@ -375,10 +411,12 @@ void craft_tcp_server::on_fetch_data(craft_conn& conn, wire::message const& req)
     wire::status code = wire::status::ok;
 
     if (!lsns) {
+        LOGERROR("craft_srv FETCH_DATA [rid:{}]: malformed body (lsn list truncated)", req.hdr.request_id);
         code = wire::status::invalid_argument; // body shorter than lsn_count implies -- malformed request
     } else {
         auto const r = replica_->srv_fetch_data(*lsns);
         if (!r) {
+            LOGWARN("craft_srv FETCH_DATA [rid:{}]: failed: {}", req.hdr.request_id, r.error().message());
             code = to_wire_status(r.error());
         } else {
             rsp.slot_count = static_cast< uint32_t >(r->size());
@@ -402,7 +440,7 @@ void craft_tcp_server::on_fetch_data(craft_conn& conn, wire::message const& req)
         }
     }
 
-    LOGTRACE("craft_srv FETCH_DATA [rid:{}] requested={} status={} returned={}", req.hdr.request_id, fr.lsn_count,
+    LOGDEBUG("craft_srv FETCH_DATA [rid:{}] requested={} status={} returned={}", req.hdr.request_id, fr.lsn_count,
              static_cast< int >(code), rsp.slot_count);
 
     std::vector< uint8_t > out;

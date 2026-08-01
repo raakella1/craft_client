@@ -54,13 +54,14 @@ inline void from_json(nlohmann::json const& j, InternalLoginMsg& m) {
     j.at("term").get_to(m.term);
 }
 
-using raft_commit_cb_t = std::function< void(uint64_t log_idx, nlohmann::json const& j) >;
+using raft_commit_cb_t =
+    std::function< void(uint64_t log_idx, nlohmann::json const& j, std::string const& group_id) >;
 
 class echo_state_machine : public nuraft::state_machine {
 public:
-    echo_state_machine(raft_commit_cb_t cb) : commit_cb_(std::move(cb)), last_commit_idx_(0) {}
+    echo_state_machine(raft_commit_cb_t cb, std::string const& group_id) : commit_cb_(std::move(cb)), group_id_{group_id}, last_commit_idx_(0) {}
 
-    virtual nuraft::ptr< nuraft::buffer > commit(nuraft::ulong log_idx, nuraft::buffer& data) {
+    virtual nuraft::ptr< nuraft::buffer > commit(nuraft::ulong log_idx, nuraft::buffer& data) override {
         nlohmann::json j;
         try {
             j = unwrap_buffer(data);
@@ -68,33 +69,34 @@ public:
             LOGERROR("commit[{}]: msgpack decode failed: {}", log_idx, e.what());
             return nullptr;
         }
-        if (commit_cb_) { commit_cb_(log_idx, j); }
+        LOGDEBUG("commit[{}]: decoded json={}, cb_set={}", log_idx, j.dump(), commit_cb_ ? "yes" : "no");
+        if (commit_cb_) { commit_cb_(log_idx, j, group_id_); }
         last_commit_idx_ = log_idx;
         return nullptr;
     }
 
-    virtual nuraft::ptr< nuraft::buffer > pre_commit(const nuraft::ulong log_idx, nuraft::buffer& data) {
-        LOGINFO("Pre-Commit message [{}] : {}", log_idx, reinterpret_cast< const char* >(data.data()));
+    virtual nuraft::ptr< nuraft::buffer > pre_commit(const nuraft::ulong log_idx, nuraft::buffer& data) override {
         return nullptr;
     }
 
-    virtual void rollback(const nuraft::ulong log_idx, nuraft::buffer& data) {
-        LOGINFO("Rollback[{}] : {}", log_idx, reinterpret_cast< const char* >(data.data()));
+    virtual void rollback(const nuraft::ulong log_idx, nuraft::buffer& data) override {}
+
+    virtual void save_snapshot_data(nuraft::snapshot& s, const nuraft::ulong offset, nuraft::buffer& data) override {}
+    virtual bool apply_snapshot(nuraft::snapshot& s) override { return true; }
+
+    virtual int read_snapshot_data(nuraft::snapshot& s, const nuraft::ulong offset, nuraft::buffer& data) override {
+        return 0;
     }
 
-    virtual void save_snapshot_data(nuraft::snapshot& s, const nuraft::ulong offset, nuraft::buffer& data) {}
-    virtual bool apply_snapshot(nuraft::snapshot& s) { return true; }
+    virtual nuraft::ptr< nuraft::snapshot > last_snapshot() override { return nuraft::ptr< nuraft::snapshot >(); }
 
-    virtual int read_snapshot_data(nuraft::snapshot& s, const nuraft::ulong offset, nuraft::buffer& data) { return 0; }
+    virtual void create_snapshot(nuraft::snapshot& s, nuraft::async_result< bool >::handler_type& when_done) override {}
 
-    virtual nuraft::ptr< nuraft::snapshot > last_snapshot() { return nuraft::ptr< nuraft::snapshot >(); }
-
-    virtual void create_snapshot(nuraft::snapshot& s, nuraft::async_result< bool >::handler_type& when_done) {}
-
-    virtual nuraft::ulong last_commit_index() { return last_commit_idx_; }
+    virtual nuraft::ulong last_commit_index() override { return last_commit_idx_; }
 
 private:
     nuraft::ulong last_commit_idx_;
     raft_commit_cb_t commit_cb_;
+    std::string group_id_;
 };
 }

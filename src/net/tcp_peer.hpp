@@ -14,8 +14,8 @@ namespace craft::net {
 
 class CraftTcpPeer final : public craft_peer {
 public:
-    CraftTcpPeer(std::string host, uint16_t port, peer_id_t id,
-                std::chrono::milliseconds op_timeout = std::chrono::milliseconds{0});
+    CraftTcpPeer(std::string host, uint16_t port, peer_id_t id, uint32_t page_size,
+                 std::chrono::milliseconds op_timeout = std::chrono::milliseconds{0});
     ~CraftTcpPeer() override;
 
     CraftTcpPeer(CraftTcpPeer const&) = delete;
@@ -39,6 +39,7 @@ private:
     std::string host_;
     uint16_t port_;
     peer_id_t id_;
+    uint32_t page_size_;
     std::chrono::milliseconds op_timeout_{0};
 
     craft_conn conn_;
