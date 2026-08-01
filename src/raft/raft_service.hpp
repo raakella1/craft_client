@@ -26,13 +26,14 @@ class raft_service : public nuraft_mesg::messaging_application, public std::enab
 public:
     inline static const std::string default_group_type_{"raft_service_raft"};
 
-    virtual ~raft_service() = default;
+    virtual ~raft_service();
     static std::shared_ptr< raft_service > instance();
     bool is_raft_enabled() { return consensus_ != nullptr; }
     consensus_handle get_consensus();
     void start_raft_service(boost::uuids::uuid const& server_uuid);
-    result< void > srv_create_volume(boost::uuids::uuid const& group_id, std::vector< replica_endpoint > const& members,
-                                     raft_commit_cb_t cb);
+    result< void > srv_create_volume(boost::uuids::uuid const& group_id,
+                                     std::vector< replica_endpoint > const& members);
+    void add_commit_cb(raft_commit_cb_t cb);
     bool is_leader(nuraft_mesg::group_id_t const& group_id);
     nuraft_mesg::peer_id_t leader_id(nuraft_mesg::group_id_t const& group_id);
 
@@ -53,12 +54,10 @@ private:
     nlohmann::json server_config_;
     std::shared_mutex mu_;
     std::map< nuraft_mesg::group_id_t, std::shared_ptr< raft_state_mgr > > state_mgrs_;
-    std::map< nuraft_mesg::group_id_t, raft_commit_cb_t > commit_cbs_;
+    raft_commit_cb_t commit_cb_;
 
     result< std::shared_ptr< raft_state_mgr > > get_state_mgr(nuraft_mesg::group_id_t const& group_id);
     void add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::shared_ptr< raft_state_mgr > mgr);
-    result< raft_commit_cb_t > get_commit_cb(nuraft_mesg::group_id_t const& group_id);
-    void add_commit_cb(nuraft_mesg::group_id_t const& group_id, raft_commit_cb_t cb);
 };
 
 } // namespace craft

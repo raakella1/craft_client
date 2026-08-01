@@ -295,7 +295,7 @@ private:
     // void apply_truncate_above(int64_t rs_commit_lsn);
 
     // Misc helpers
-    void init_faults();
+    void init();
     MemJournalSlot to_mem_journal_slot(JournalSlot const& j, uint64_t term);
     std::vector< int64_t > get_missing_slots(int64_t watermark);
     std::pair< std::vector< int64_t >, int64_t >

@@ -14,8 +14,10 @@ std::shared_ptr< replica_manager > replica_manager::instance() {
     return inst;
 }
 
-void replica_manager::start_replica_service(std::string const& path, boost::uuids::uuid const& my_uuid) {
+void replica_manager::start_replica_service(std::string const& path, boost::uuids::uuid const& my_uuid,
+                                            uint32_t page_size) {
     id_ = my_uuid;
+    page_size_ = page_size;
     std::ifstream istrm(path, std::ios::binary);
     if (!istrm.is_open()) {
         LOGERROR("replica_manager: could not open {}", path);
@@ -39,10 +41,10 @@ void replica_manager::start_replica_service(std::string const& path, boost::uuid
                               .host = m.at("host").get< std::string >(),
                               .raft_port = m.at("raft_port").get< uint16_t >(),
                               .tcp_port = m.at("tcp_port").get< uint16_t >(),
-                              .peer_client = (id == my_uuid)
-                                  ? nullptr
-                                  : std::make_shared< net::CraftTcpPeer >(m.at("host").get< std::string >(),
-                                                                          m.at("tcp_port").get< uint16_t >(), id),
+                              .peer_client = (id == my_uuid) ? nullptr
+                                                             : std::make_shared< net::CraftTcpPeer >(
+                                                                   m.at("host").get< std::string >(),
+                                                                   m.at("tcp_port").get< uint16_t >(), id, page_size_),
                           });
     }
 }

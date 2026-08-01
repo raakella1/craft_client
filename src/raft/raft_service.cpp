@@ -31,6 +31,8 @@ std::shared_ptr< raft_service > raft_service::instance() {
 consensus_handle raft_service::get_consensus() { return consensus_; }
 
 void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
+    // raft global manager for commits
+    nuraft::nuraft_global_mgr::init();
     std::call_once(raft_started_, [&] {
         auto const my_port = replica_manager::instance()->get(server_uuid)->raft_port;
         auto params = nuraft_mesg::manager::params{
@@ -40,6 +42,10 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
         };
         consensus_ = nuraft_mesg::init_messaging(params, weak_from_this(), true /*with_data_svc*/);
         auto raft_params = nuraft::raft_params{};
+        raft_params.with_election_timeout_upper(1800)
+            .with_election_timeout_lower(900)
+            .with_hb_interval(250)
+            .with_rpc_failure_backoff(250);
         consensus_->register_mgr_type(default_group_type_, raft_params);
         server_uuid_ = server_uuid;
         LOGINFO("Initialized raft_service for {} with raft consensus manager, port {}", params.server_uuid_,
@@ -47,8 +53,13 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
     });
 }
 
+raft_service::~raft_service() {
+    consensus_.reset();
+    nuraft::nuraft_global_mgr::shutdown();
+}
+
 result< void > raft_service::srv_create_volume(boost::uuids::uuid const& group_id,
-                                               std::vector< replica_endpoint > const& members, raft_commit_cb_t cb) {
+                                               std::vector< replica_endpoint > const& members) {
     auto consensus = raft_service::instance()->get_consensus();
 
     // Seat THIS replica as leader by creating the group.
@@ -70,7 +81,7 @@ result< void > raft_service::srv_create_volume(boost::uuids::uuid const& group_i
             return fail(craft_error::INTERNAL);
         }
     }
-    add_commit_cb(group_id, cb);
+
     return {};
 }
 
@@ -90,8 +101,7 @@ std::shared_ptr< nuraft_mesg::mesg_state_mgr > raft_service::create_state_mgr(in
         return result.value();
     }
     LOGINFO("Creating RAFT state manager for server_id={} group_id={}", srv_id, boost::uuids::to_string(group_id));
-    auto const r = get_commit_cb(group_id);
-    auto mgr = std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id, (r ? r.value() : nullptr));
+    auto mgr = std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id, commit_cb_);
     add_state_mgr(group_id, mgr);
     return mgr;
 }
@@ -108,16 +118,9 @@ void raft_service::add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::s
     state_mgrs_[group_id] = std::move(mgr);
 }
 
-result< raft_commit_cb_t > raft_service::get_commit_cb(nuraft_mesg::group_id_t const& group_id) {
-    std::shared_lock< std::shared_mutex > g{mu_};
-    auto const it = commit_cbs_.find(group_id);
-    if (it == commit_cbs_.end()) return fail(craft_error::INTERNAL);
-    return it->second;
-}
-
-void raft_service::add_commit_cb(nuraft_mesg::group_id_t const& group_id, raft_commit_cb_t cb) {
-    std::lock_guard< std::shared_mutex > g{mu_};
-    commit_cbs_.emplace(group_id, std::move(cb));
+void raft_service::add_commit_cb(raft_commit_cb_t cb) {
+    // we expect that this is called only once
+    commit_cb_ = std::move(cb);
 }
 
 bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {

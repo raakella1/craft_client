@@ -67,6 +67,8 @@ struct JournalSlot {
     lba_t lba{0};
     lba_count_t len{0};
     sisl::sg_list data{};
+    std::shared_ptr< std::vector< uint8_t > >
+        owned_data{}; // optional: null when data is borrowed (do_fetch), set when owned (fetch_data)
 };
 
 // The peer-facing surface of one replica: what a PEER (not a client) may ask of it. Driven by the leader during
