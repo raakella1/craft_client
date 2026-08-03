@@ -40,7 +40,8 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
 
   CraftClientDeps:
-    needs: [SislDeps]
+    needs: SislDeps
+    if: ${{ always() && (needs.SislDeps.result == 'success' || needs.SislDeps.result == 'skipped') }}
     uses: ./.github/workflows/build_dependencies.yml
     with:
       branch: ${{ github.ref }}
