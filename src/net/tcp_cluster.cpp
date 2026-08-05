@@ -32,7 +32,8 @@ class tcp_cluster {
 public:
     tcp_cluster(std::vector< std::shared_ptr< CraftTcpReplica > > proxies,
                 std::vector< std::shared_ptr< craft_replica > > backends) :
-            proxies_{std::move(proxies)}, backends_{std::move(backends)} {}
+            proxies_{std::move(proxies)},
+            backends_{std::move(backends)} {}
     ~tcp_cluster() {
         for (auto& p : proxies_)
             if (p) p->shutdown(); // drain each proxy from HERE (the destroying thread) before any of them drops

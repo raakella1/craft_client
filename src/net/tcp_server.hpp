@@ -35,7 +35,7 @@
 namespace craft {
 class MemCraftReplica; // the server's state backing (pimpl; included only in craft_tcp_server.cpp)
 struct server_geometry;
-}
+} // namespace craft
 
 namespace craft::net {
 

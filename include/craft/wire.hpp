@@ -77,7 +77,8 @@ enum class op : uint8_t {
     //   1. keep the request=odd / response=even convention, and
     //   2. bump k_max_op below -- is_response() is a range check, so a peer op added without it is silently
     //      misclassified as "not a response". That is the trap this constant exists to close.
-    create_volume = 15, // client-requested volume creation (leader-only)
+
+    create_volume = 15, // client-requested volume creation: bootstrap-only
     create_volume_rsp = 16,
     get_rs_commit_lsn = 17,
     get_rs_commit_lsn_rsp = 18,
@@ -231,8 +232,7 @@ struct volume_create_req {
 // volume_create_rsp: status only (no operation header, no body).
 
 // GetRSCommitLSN: non-RAFT peer query of a replica's {commit_lsn, last_append_lsn}. is_login triggers the
-// quiesce barrier on the responder (see CRAFT Design's Login section). my_commit/my_append are the LEADER's
-// own watermarks, riding the request per "the poll set includes the leader itself".
+// quiesce barrier on the responder (see CRAFT Design's Login section).
 struct get_rs_commit_lsn_req {
     uint64_t term;
     uint8_t is_login; // bool, but keep POD-packed layout consistent with the rest of this file
@@ -253,6 +253,7 @@ struct fetch_slot_desc {
     int64_t lsn;         // which dLSN this is
     uint64_t lba;        // where it writes to
     uint32_t len;        // how many blocks
+    uint64_t byte_len;   // data bytes size
     uint8_t is_empty;    // Empty verdict? (no data follows)
     uint8_t all_zeros;   // zero write? (no data follows)
     uint8_t reserved[2]; // padding
@@ -284,7 +285,7 @@ static_assert(sizeof(volume_create_req) == 32);
 static_assert(sizeof(get_rs_commit_lsn_req) == 16);
 static_assert(sizeof(get_rs_commit_lsn_rsp) == 16);
 static_assert(sizeof(fetch_data_req) == 8);
-static_assert(sizeof(fetch_slot_desc) == 24);
+static_assert(sizeof(fetch_slot_desc) == 32);
 static_assert(sizeof(fetch_data_rsp) == 8);
 // The fixed operation-header size for an op code (0 for a status-only response). nullopt = unknown op, which
 // is unframeable -- the caller resets the connection.

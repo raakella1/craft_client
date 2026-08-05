@@ -1,6 +1,12 @@
+#pragma once
 #include <boost/uuid/random_generator.hpp>
 #include <nlohmann/json.hpp>
 #include <stdexec/execution.hpp>
+#include <fstream>
+#include <algorithm>
+#include <array>
+
+#include <sisl/logging/logging.h>
 
 namespace craft {
 
@@ -31,9 +37,7 @@ inline auto sync_get(Task&& task) {
 
 inline std::error_condition jsonObjectFromFile(std::string const& filename, json& json_object) {
     std::ifstream istrm(filename, std::ios::binary);
-    if (!istrm.is_open()) {
-        return std::make_error_condition(std::errc::no_such_file_or_directory);
-    }
+    if (!istrm.is_open()) { return std::make_error_condition(std::errc::no_such_file_or_directory); }
 
     istrm >> json_object;
     if (!json_object.is_object()) {
@@ -43,4 +47,4 @@ inline std::error_condition jsonObjectFromFile(std::string const& filename, json
     return std::error_condition();
 }
 
-}
+} // namespace craft

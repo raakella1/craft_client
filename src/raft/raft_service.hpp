@@ -37,7 +37,7 @@ public:
     bool is_leader(nuraft_mesg::group_id_t const& group_id);
     nuraft_mesg::peer_id_t leader_id(nuraft_mesg::group_id_t const& group_id);
 
-    // raft append entrues
+    // raft append entries
     template < typename MsgT >
     result< void > propose(boost::uuids::uuid const& group_id, MsgT const& payload);
 

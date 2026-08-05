@@ -34,10 +34,14 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
     // raft global manager for commits
     nuraft::nuraft_global_mgr::init();
     std::call_once(raft_started_, [&] {
-        auto const my_port = replica_manager::instance()->get(server_uuid)->raft_port;
+        auto const& my_info = replica_manager::instance()->get(server_uuid);
+        if (!my_info) {
+            LOGERROR("Could not start raft service, unrecognized replica uuid {}", server_uuid);
+            return;
+        }
         auto params = nuraft_mesg::manager::params{
             .server_uuid_ = server_uuid,
-            .mesg_port_ = my_port,
+            .mesg_port_ = my_info->raft_port,
             .default_group_type_ = default_group_type_,
         };
         consensus_ = nuraft_mesg::init_messaging(params, weak_from_this(), true /*with_data_svc*/);
@@ -54,16 +58,22 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
 }
 
 raft_service::~raft_service() {
-    consensus_.reset();
-    nuraft::nuraft_global_mgr::shutdown();
+    if (consensus_) {
+        consensus_.reset();
+        nuraft::nuraft_global_mgr::shutdown();
+    }
 }
 
 result< void > raft_service::srv_create_volume(boost::uuids::uuid const& group_id,
                                                std::vector< replica_endpoint > const& members) {
-    auto consensus = raft_service::instance()->get_consensus();
+    if (!consensus_) {
+        // raft_service::srv_create_volume should not be called if raft service is not enabled
+        LOGERROR("Raft not enabled!");
+        return fail(craft_error::INTERNAL);
+    }
 
     // Seat THIS replica as leader by creating the group.
-    if (auto const status = craft::sync_get(consensus->create_group(group_id, raft_service::default_group_type_));
+    if (auto const status = craft::sync_get(consensus_->create_group(group_id, raft_service::default_group_type_));
         !status) {
         return fail(craft_error::INTERNAL);
     }
@@ -75,9 +85,8 @@ result< void > raft_service::srv_create_volume(boost::uuids::uuid const& group_i
         }
         if (m.id == server_uuid_) continue;
 
-        auto srv_cfg =
-            nuraft::srv_config(nuraft_mesg::to_server_id(m.id), 0, boost::uuids::to_string(m.id), "", false);
-        if (auto const result = craft::sync_get(consensus->add_member(group_id, srv_cfg)); !result) {
+        auto srv_cfg = nuraft::srv_config(nuraft_mesg::to_server_id(m.id), 0, boost::uuids::to_string(m.id), "", false);
+        if (auto const result = craft::sync_get(consensus_->add_member(group_id, srv_cfg)); !result) {
             return fail(craft_error::INTERNAL);
         }
     }
@@ -120,10 +129,20 @@ void raft_service::add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::s
 
 void raft_service::add_commit_cb(raft_commit_cb_t cb) {
     // we expect that this is called only once
+    if (!consensus_) {
+        // raft_service::srv_create_volume should not be called if raft service is not enabled
+        LOGERROR("Raft not enabled!");
+        return;
+    }
     commit_cb_ = std::move(cb);
 }
 
 bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
+    if (!consensus_) {
+        // raft_service::srv_create_volume should not be called if raft service is not enabled
+        LOGERROR("Raft not enabled!");
+        return false;
+    }
     auto const state_mgr = get_state_mgr(group_id);
     if (!state_mgr) {
         LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
@@ -134,6 +153,11 @@ bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
 }
 
 nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& group_id) {
+    if (!consensus_) {
+        // raft_service::srv_create_volume should not be called if raft service is not enabled
+        LOGERROR("Raft not enabled!");
+        return {};
+    }
     auto const state_mgr = get_state_mgr(group_id);
     if (!state_mgr) {
         LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
@@ -144,7 +168,11 @@ nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& gr
         LOGWARN("No leader for the raft group {}", group_id);
         return {};
     }
-    return boost::uuids::string_generator()(raft_ctx->raft_leader_id());
+    if (auto const leader_id = raft_ctx->raft_leader_id(); !leader_id.empty()) {
+        return boost::uuids::string_generator()(raft_ctx->raft_leader_id());
+    }
+    LOGWARN("No leader for the raft group {}", group_id);
+    return {};
 }
 
 template < typename MsgT >
@@ -161,7 +189,7 @@ result< void > raft_service::propose(boost::uuids::uuid const& group_id, MsgT co
     }
 
     auto const append_status = raft_ctx->raft_server()->append_entries({create_message(nlohmann::json(payload))});
-    if (append_status && !append_status->get_accepted()) {
+    if (!append_status || !append_status->get_accepted()) {
         return std::unexpected(nuraft_mesg::to_condition(append_status->get_result_code()));
     }
     return {};

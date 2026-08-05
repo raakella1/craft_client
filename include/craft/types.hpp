@@ -28,8 +28,9 @@
 #include <vector>
 
 #include <boost/uuid/uuid.hpp>       // boost::uuids::uuid (== peer_id_t)
-#include <sisl/async/light_task.hpp> // sisl::async::light_result / ::light_status
 #include <sisl/utility/enum.hpp>     // ENUM
+#include <sisl/result.hpp>           // result types
+#include <sisl/async/light_task.hpp> // sisl::async::light_result / ::light_status (the co_await-able result carrier)
 
 namespace craft {
 
@@ -43,6 +44,13 @@ using peer_id_t = boost::uuids::uuid;
 // The id of the volume/partition a replica set serves. Same 16-byte uuid type; the reference model derives
 // each replica's peer_id_t deterministically from it (mem_replica_id).
 using volume_id_t = boost::uuids::uuid;
+
+template < typename T >
+using async_result = sisl::async::light_result< T >;
+using async_status = sisl::async::light_status;
+
+template < typename T >
+using result = sisl::result< T >;
 
 // Network address of a replica, as returned in login()'s member list.
 struct replica_endpoint {
