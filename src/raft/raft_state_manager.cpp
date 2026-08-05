@@ -118,7 +118,7 @@ void raft_state_mgr::save_state(const nuraft::srv_state& state) {
 uint32_t raft_state_mgr::get_logstore_id() const { return 0; }
 
 std::shared_ptr< nuraft::state_machine > raft_state_mgr::get_state_machine() {
-    return std::make_shared< echo_state_machine >(std::move(_commit_cb), _group_id);
+    return std::make_shared< echo_state_machine >(_commit_cb, _group_id);
 }
 
 void raft_state_mgr::permanent_destroy() {}

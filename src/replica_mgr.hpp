@@ -35,7 +35,7 @@ public:
     // raft's messaging_application::lookup_peer bridge: peer_id -> "host:raft_port".
     std::string lookup_peer(boost::uuids::uuid const& id) const;
     std::optional< replica_info > get(boost::uuids::uuid const& id) const;
-    void register_volume(boost::uuids::uuid const& vol_uuid, std::vector< replica_endpoint > const& members);
+    result< void > register_volume(boost::uuids::uuid const& vol_uuid, std::vector< replica_endpoint > const& members);
     std::vector< replica_info > get_volume(boost::uuids::uuid const& volume_id);
 
 private:
@@ -45,7 +45,7 @@ private:
     uint32_t page_size_;
     mutable std::shared_mutex mu_;
     std::map< boost::uuids::uuid, replica_info > replicas_;                  // static, loaded once
-    std::map< boost::uuids::uuid, std::vector< replica_info > > volumes_;
+    std::map< boost::uuids::uuid, std::vector< boost::uuids::uuid > > volumes_;
 };
 
 } // namespace craft

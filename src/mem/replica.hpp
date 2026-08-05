@@ -135,6 +135,8 @@ public:
     MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net);
     MemCraftReplica(server_geometry geo);
 
+    ~MemCraftReplica();
+
     // Snapshot this replica's state. Takes mu_ and deliberately does NOT consult net_: do_write() locks
     // the transport before mu_, so reading net_ under mu_ here would invert that order. Callers that want
     // liveness (is_up / write_allowed) ask the transport themselves.
@@ -247,6 +249,7 @@ private:
         std::shared_ptr< std::vector< uint8_t > > buf; // one page at buf->data()+off
         std::size_t off{0};
     };
+    class RaftCommitWorker;
 
     // Synchronous cores: the SERVER. Each takes mu_. Deliverability, latency and payload ownership are the
     // transport's job (MemTransport::send_*), which is why nothing below consults net_ or copies bytes.
@@ -337,6 +340,7 @@ private:
     std::mutex login_mu_;
     std::condition_variable login_cv_;
     bool login_done_{false};
+    std::unique_ptr< RaftCommitWorker > commit_worker_;
 };
 
 } // namespace craft

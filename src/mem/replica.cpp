@@ -27,6 +27,7 @@
 #include <system_error>
 #include <chrono>
 #include <boost/uuid/string_generator.hpp>
+#include <queue>
 
 #include <liburing.h>               // the on-ring data path: SQE prep / user_data
 #include <sisl/async/cqe_state.hpp> // sisl::async::cqe_awaitable + the managed-user_data contract the reap loop shares
@@ -54,7 +55,41 @@ std::shared_ptr< std::vector< uint8_t > > take_payload(sisl::sg_list const& s) {
     }
     return b;
 }
+
 } // namespace
+
+// background worker for raft commit to run replica's business logic
+class MemCraftReplica::RaftCommitWorker {
+    std::queue< std::move_only_function< void() > > queue_;
+    std::mutex mtx_;
+    std::condition_variable_any cv_;
+    std::jthread worker_;
+
+public:
+    RaftCommitWorker() : worker_([this](std::stop_token st) { run(st); }) {}
+
+    void push_task(std::move_only_function< void() > work) {
+        {
+            std::lock_guard lk(mtx_);
+            queue_.push(std::move(work));
+        }
+        cv_.notify_one();
+    }
+
+private:
+    void run(std::stop_token st) {
+        while (!st.stop_requested()) {
+            std::unique_lock lk(mtx_);
+            cv_.wait(lk, st, [this] { return !queue_.empty(); }); // wakes on stop too
+            if (st.stop_requested() && queue_.empty()) return;
+
+            auto task = std::move(queue_.front());
+            queue_.pop();
+            lk.unlock();
+            task();
+        }
+    }
+};
 
 void MemCraftReplica::init() {
     // Publish the initial (healthy) fault snapshot before any IO can read it.
@@ -101,6 +136,9 @@ void MemCraftReplica::init() {
         }
     };
     raft_inst->add_commit_cb(std::move(commit_cb));
+
+    // start background commit offload worker
+    commit_worker_ = std::make_unique< MemCraftReplica::RaftCommitWorker >();
 }
 
 MemCraftReplica::MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net) :
@@ -114,6 +152,8 @@ MemCraftReplica::MemCraftReplica(server_geometry geo) : geo_{std::move(geo)} {
     LOGDEBUG("MemCraftReplica constructed [id={}] lba_size={} capacity={}", boost::uuids::to_string(geo_.ep.id),
              geo_.lba_size, geo_.capacity);
 }
+
+MemCraftReplica::~MemCraftReplica() = default;
 
 // ── fault injection (COW; readers never block, and a reader holding the old snapshot stays valid) ──
 

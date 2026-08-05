@@ -34,10 +34,14 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
     // raft global manager for commits
     nuraft::nuraft_global_mgr::init();
     std::call_once(raft_started_, [&] {
-        auto const my_port = replica_manager::instance()->get(server_uuid)->raft_port;
+        auto const& my_info = replica_manager::instance()->get(server_uuid);
+        if (!my_info) {
+            LOGERROR("Could not start raft service, unrecognized replica uuid {}", server_uuid);
+            return;
+        }
         auto params = nuraft_mesg::manager::params{
             .server_uuid_ = server_uuid,
-            .mesg_port_ = my_port,
+            .mesg_port_ = my_info->raft_port,
             .default_group_type_ = default_group_type_,
         };
         consensus_ = nuraft_mesg::init_messaging(params, weak_from_this(), true /*with_data_svc*/);
@@ -144,7 +148,11 @@ nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& gr
         LOGWARN("No leader for the raft group {}", group_id);
         return {};
     }
-    return boost::uuids::string_generator()(raft_ctx->raft_leader_id());
+    if (auto const leader_id = raft_ctx->raft_leader_id(); !leader_id.empty()) {
+        return boost::uuids::string_generator()(raft_ctx->raft_leader_id());
+    }
+    LOGWARN("No leader for the raft group {}", group_id);
+    return {};
 }
 
 template < typename MsgT >
@@ -161,7 +169,7 @@ result< void > raft_service::propose(boost::uuids::uuid const& group_id, MsgT co
     }
 
     auto const append_status = raft_ctx->raft_server()->append_entries({create_message(nlohmann::json(payload))});
-    if (append_status && !append_status->get_accepted()) {
+    if (!append_status || !append_status->get_accepted()) {
         return std::unexpected(nuraft_mesg::to_condition(append_status->get_result_code()));
     }
     return {};

@@ -126,16 +126,7 @@ void craft_tcp_server::serve(craft_conn conn) {
 void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
     // session_active_ is stoll maintained here, change it once we support multi volume
     std::vector< uint8_t > out;
-    if (session_active_) {
-        LOGWARN("craft_srv LOGIN [rid:{}]: rejected, a session is already active (term={})", req.hdr.request_id,
-                session_term_);
-        wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::not_eligible),
-                            req.hdr.request_id, {}, {});
-        conn.send_all(out);
-        return;
-    }
     session_term_ = ++next_term_; // a fresh session term, established (and fenced) on this connection
-    session_active_ = true;
     auto const lr = wire::decode< wire::login_req >(req.op_header);
     LOGINFO("craft_srv LOGIN [rid:{}]: client_token={} new_term={}", req.hdr.request_id, lr.client_token,
             session_term_);
@@ -176,6 +167,7 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
 
     LOGINFO("craft_srv LOGIN [rid:{}]: SUCCESS term={} dlsn={} members={}", req.hdr.request_id, rsp.term, rsp.dlsn,
             rsp.member_count);
+    session_active_ = true;
     wire::frame_message(out, wire::op::login_rsp, static_cast< uint8_t >(wire::status::ok), req.hdr.request_id,
                         as_bytes(rsp), body);
     conn.send_all(out);
