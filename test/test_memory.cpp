@@ -223,8 +223,8 @@ TEST(CraftMemModel, CommitPiggybacksOnWrite) {
     auto& r = *g.replicas[0];
     auto b0 = page_of(0x11), b1 = page_of(0x22);
     ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(b0))).has_value()); // no commit yet
-    ASSERT_TRUE(
-        rg(r.write(nullptr, chdr(term, /*commit_lsn*/ 0), 1, blk(6), blk(1), one_iov(b1))).has_value()); // rides commit 0
+    ASSERT_TRUE(rg(r.write(nullptr, chdr(term, /*commit_lsn*/ 0), 1, blk(6), blk(1), one_iov(b1)))
+                    .has_value()); // rides commit 0
 
     auto ls = rg(r.get_lsns());
     ASSERT_TRUE(ls.has_value());
@@ -431,7 +431,7 @@ TEST(CraftMemModel, ClearingADelayLeavesAMissingSlotThatDrains) {
     auto const slow = rg(r.write(nullptr, chdr(term), 1, blk(2), blk(1), one_iov(buf))); // dLSN 1 times out
     ASSERT_FALSE(slow.has_value());
 
-    r.set_delay(std::chrono::milliseconds{0});                                         // straggler recovers
+    r.set_delay(std::chrono::milliseconds{0});                                                  // straggler recovers
     ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 2, blk(3), blk(1), one_iov(buf))).has_value()); // dLSN 2 lands now
     ASSERT_TRUE(rg(r.keep_alive(nullptr, chdr(term, 2))).has_value());
 

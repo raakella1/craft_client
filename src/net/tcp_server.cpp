@@ -45,7 +45,7 @@ craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& serve
     // net == nullptr: this replica serves exclusively through its srv_* seam (the TCP frontend IS the wire).
     // start replica service and raft service if server_config_file is provided
     if (!server_config_file.empty()) {
-        replica_manager::instance()->start_replica_service(server_config_file, geo.ep.id, geo.lba_size);
+        replica_manager::instance()->start_replica_service(server_config_file, geo.ep.id);
         raft_service::instance()->start_raft_service(geo.ep.id);
         LOGINFO("craft_tcp_server: replica_manager + raft_service started [id={}]", boost::uuids::to_string(geo.ep.id));
     } else {
@@ -124,7 +124,7 @@ void craft_tcp_server::serve(craft_conn conn) {
 }
 
 void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
-    // session_active_ is stoll maintained here, change it once we support multi volume
+    // session_active_ is still maintained here, change it once we support multi volume
     std::vector< uint8_t > out;
     session_term_ = ++next_term_; // a fresh session term, established (and fenced) on this connection
     auto const lr = wire::decode< wire::login_req >(req.op_header);
@@ -175,19 +175,26 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
 
 void craft_tcp_server::on_helo(craft_conn& conn, wire::message const& req) {
     auto const hr = wire::decode< wire::helo_req >(req.op_header);
-
-    // Fence: HELO must present the term + token of the session the replica already knows about.
-    // Only binds this connection if it matches.
-    auto const current = replica_->srv_session_info(hr.volume_id);
     wire::status code = wire::status::ok;
 
-    bool is_raft_enabled = raft_service::instance()->is_raft_enabled();
-
-    if (is_raft_enabled && (hr.term != current.term || hr.client_token != current.client_token)) {
+    if (bool is_raft_enabled = raft_service::instance()->is_raft_enabled(); !is_raft_enabled) {
+        // no raft, follow fake cold path
+        auto result = replica_->srv_establish(hr.volume_id, hr.client_token, session_term_);
+        if (!result) {
+            LOGERROR("craft_srv HELO [rid:{}]: token: {}, term: {}, srv_establish failed: {}", req.hdr.request_id,
+                     hr.client_token, hr.term, result.error().message());
+            code = to_wire_status(result.error());
+        }
+    } else if (auto const current = replica_->srv_session_info(hr.volume_id);
+               hr.term != current.term || hr.client_token != current.client_token) {
+        // Raft is enabled, Fence: HELO must present the term + token of the session the replica already knows about.
+        // Only binds this connection if it matches.
         LOGWARN("craft_srv HELO [rid:{}]: FENCED -- presented term={} token={}, current term={} token={}",
                 req.hdr.request_id, hr.term, hr.client_token, current.term, current.client_token);
         code = wire::status::stale_term;
-    } else {
+    }
+
+    if (code == wire::status::ok) {
         session_term_ = hr.term;
         session_active_ = true;
         LOGDEBUG("craft_srv HELO [rid:{}]: bound connection at term={}", req.hdr.request_id, hr.term);
@@ -355,8 +362,8 @@ void craft_tcp_server::on_create_volume(craft_conn& conn, wire::message const& r
         for (auto const& m : *members) {
             replica_members.emplace_back(replica_endpoint{.id = craft::to_uuid(m.id), .addr = m.addr});
         }
-        auto const r = replica_->srv_create_volume(cr.volume_id, replica_members);
-        if (!r) {
+
+        if (auto const r = replica_->srv_create_volume(cr.volume_id, replica_members); !r) {
             LOGERROR("craft_srv CREATE_VOLUME [rid:{}]: srv_create_volume failed: {}", req.hdr.request_id,
                      r.error().message());
             code = to_wire_status(r.error());
@@ -395,6 +402,7 @@ void craft_tcp_server::on_get_rs_commit_lsn(craft_conn& conn, wire::message cons
 }
 
 void craft_tcp_server::on_fetch_data(craft_conn& conn, wire::message const& req) {
+    // TODO: Apply max_tx cap and chunking for very large fetch requests.
     auto const fr = wire::decode< wire::fetch_data_req >(req.op_header);
     auto const lsns = wire::decode_lsns(req.body, fr.lsn_count);
 
@@ -412,7 +420,6 @@ void craft_tcp_server::on_fetch_data(craft_conn& conn, wire::message const& req)
             code = to_wire_status(r.error());
         } else {
             rsp.slot_count = static_cast< uint32_t >(r->size());
-            // descriptors first (fixed-size, easy to walk), then concatenated data for non-empty/non-zero slots
             for (auto const& slot : *r) {
                 wire::fetch_slot_desc sd{};
                 sd.lsn = slot.lsn;
@@ -420,6 +427,8 @@ void craft_tcp_server::on_fetch_data(craft_conn& conn, wire::message const& req)
                 sd.len = slot.len;
                 sd.is_empty = slot.is_empty ? 1 : 0;
                 sd.all_zeros = slot.all_zeros ? 1 : 0;
+                sd.byte_len = 0;
+                if (!slot.is_empty && !slot.all_zeros) { sd.byte_len += slot.data.size; }
                 wire::put(body, sd);
             }
             for (auto const& slot : *r) {

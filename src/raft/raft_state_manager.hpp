@@ -31,7 +31,7 @@ private:
     int32_t const _srv_id;
     std::string const _srv_addr;
     std::string const _group_id;
-    raft_commit_cb_t _commit_cb; // temp storage, will be passed on to state machine
+    raft_commit_cb_t _commit_cb;
 };
 
-}
+} // namespace craft

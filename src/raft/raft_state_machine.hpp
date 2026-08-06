@@ -40,6 +40,7 @@ inline void from_json(nlohmann::json const& j, SyncRSCommitLSNMsg& m) {
 struct InternalLoginMsg {
     uint64_t client_token{0};
     uint64_t term{0};
+    int64_t rs_commit_lsn{-1};
 };
 
 inline void to_json(nlohmann::json& j, InternalLoginMsg const& m) {
@@ -54,13 +55,14 @@ inline void from_json(nlohmann::json const& j, InternalLoginMsg& m) {
     j.at("term").get_to(m.term);
 }
 
-using raft_commit_cb_t =
-    std::function< void(uint64_t log_idx, nlohmann::json const& j, std::string const& group_id) >;
+using raft_commit_cb_t = std::function< void(uint64_t log_idx, nlohmann::json const& j, std::string const& group_id) >;
 
 class echo_state_machine : public nuraft::state_machine {
 public:
     echo_state_machine(raft_commit_cb_t const& cb, std::string const& group_id) :
-            commit_cb_{cb}, group_id_{group_id}, last_commit_idx_(0) {}
+            commit_cb_{cb},
+            group_id_{group_id},
+            last_commit_idx_(0) {}
 
     virtual nuraft::ptr< nuraft::buffer > commit(nuraft::ulong log_idx, nuraft::buffer& data) override {
         nlohmann::json j;
@@ -104,4 +106,4 @@ private:
     std::string group_id_;
     nuraft::ulong last_commit_idx_;
 };
-}
+} // namespace craft

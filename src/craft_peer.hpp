@@ -47,7 +47,6 @@
 #include <sisl/fds/buffer.hpp> // sisl::sg_list
 
 #include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases
-#include <craft/client.hpp> // result types
 
 namespace craft {
 

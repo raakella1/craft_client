@@ -40,7 +40,10 @@ constexpr std::size_t k_recv_chunk = 64 * 1024; // per-recv landing size; a mess
 } // namespace
 
 craft_async_conn::craft_async_conn(std::string host, uint16_t port, uint32_t max_tx, ::io_uring* ring) :
-        host_{std::move(host)}, port_{port}, max_tx_{max_tx}, ring_{ring} {}
+        host_{std::move(host)},
+        port_{port},
+        max_tx_{max_tx},
+        ring_{ring} {}
 
 craft_async_conn::~craft_async_conn() { shutdown(); }
 
@@ -108,20 +111,20 @@ sisl::async::light_task< int > craft_async_conn::ring_connect() {
         int const one = 1;
         ::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     }
-    if (fd_ < 0) co_return -errno;
+    if (fd_ < 0) co_return - errno;
 
     sockaddr_in sa{};
     sa.sin_family = AF_INET;
     sa.sin_port = htons(port_);
-    if (::inet_pton(AF_INET, host_.c_str(), &sa.sin_addr) != 1) co_return -EINVAL; // loopback / IP literal only (v1)
+    if (::inet_pton(AF_INET, host_.c_str(), &sa.sin_addr) != 1) co_return - EINVAL; // loopback / IP literal only (v1)
 
     sisl::async::cqe_awaitable ev;
     auto* sqe = acquire_sqe();
-    if (nullptr == sqe) co_return -EAGAIN;
+    if (nullptr == sqe) co_return - EAGAIN;
     ::io_uring_prep_connect(sqe, fd_, reinterpret_cast< sockaddr* >(&sa), sizeof(sa)); // sa is frame-local, stable
     ::io_uring_sqe_set_data64(sqe, sisl::async::encode_managed_user_data(&ev));
     int const res = co_await ev;
-    co_return (res < 0) ? res : 0;
+    co_return(res < 0) ? res : 0;
 }
 
 sisl::async::light_task< int > craft_async_conn::ring_send_all(std::span< uint8_t const > data) {
@@ -129,11 +132,11 @@ sisl::async::light_task< int > craft_async_conn::ring_send_all(std::span< uint8_
     while (off < data.size()) {
         sisl::async::cqe_awaitable ev;
         auto* sqe = acquire_sqe();
-        if (nullptr == sqe) co_return -EAGAIN;
+        if (nullptr == sqe) co_return - EAGAIN;
         ::io_uring_prep_send(sqe, fd_, data.data() + off, data.size() - off, MSG_NOSIGNAL);
         ::io_uring_sqe_set_data64(sqe, sisl::async::encode_managed_user_data(&ev));
         int const n = co_await ev;
-        if (n <= 0) co_return (n == 0 ? -EPIPE : n); // 0 = peer closed; <0 = error
+        if (n <= 0) co_return(n == 0 ? -EPIPE : n); // 0 = peer closed; <0 = error
         off += static_cast< std::size_t >(n);
     }
     co_return 0;

@@ -53,7 +53,10 @@ void set_nodelay(int fd) {
 craft_conn::~craft_conn() { close_all(); }
 
 craft_conn::craft_conn(craft_conn&& o) noexcept :
-        fd_(o.fd_), ring_(o.ring_), ring_ready_(o.ring_ready_), rx_(std::move(o.rx_)) {
+        fd_(o.fd_),
+        ring_(o.ring_),
+        ring_ready_(o.ring_ready_),
+        rx_(std::move(o.rx_)) {
     // io_uring's pointers reference external mmap'd memory, so copying the struct and disarming the source
     // (so only we exit the ring) is a valid move.
     o.fd_ = -1;

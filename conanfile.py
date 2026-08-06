@@ -10,7 +10,7 @@ required_conan_version = ">=1.60.0"
 
 class CraftClientConan(ConanFile):
     name = "craft_client"
-    version = "0.4.3"
+    version = "0.4.6"
 
     description = (
         "CRAFT reference client + wire protocol -- transport-agnostic, HomeStore-free"
@@ -66,7 +66,6 @@ class CraftClientConan(ConanFile):
     def requirements(self):
         # craft_wire is a std-only leaf and needs nothing. craft_types / craft_client (added as they land) pull
         # sisl (result / async::result / sg_list) and liburing (the io_uring transport);
-        # nuraft_mesg is used by the tcp_server for the tests only
         # declared here so the package graph is right from the start.
         self.requires("sisl/[^14.8]@oss/dev", transitive_headers=True)
         self.requires("liburing/[^2.4]", transitive_headers=True)

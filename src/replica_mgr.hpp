@@ -30,7 +30,7 @@ class replica_manager {
 public:
     static std::shared_ptr< replica_manager > instance();
 
-    void start_replica_service(std::string const& path, boost::uuids::uuid const& my_uuid, uint32_t page_size);
+    void start_replica_service(std::string const& path, boost::uuids::uuid const& my_uuid);
 
     // raft's messaging_application::lookup_peer bridge: peer_id -> "host:raft_port".
     std::string lookup_peer(boost::uuids::uuid const& id) const;
@@ -42,9 +42,8 @@ private:
     replica_manager() = default;
 
     boost::uuids::uuid id_;
-    uint32_t page_size_;
     mutable std::shared_mutex mu_;
-    std::map< boost::uuids::uuid, replica_info > replicas_;                  // static, loaded once
+    std::map< boost::uuids::uuid, replica_info > replicas_; // static, loaded once
     std::map< boost::uuids::uuid, std::vector< boost::uuids::uuid > > volumes_;
 };
 

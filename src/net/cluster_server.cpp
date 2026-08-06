@@ -431,9 +431,7 @@ void craft_cluster_server::set_replica_up(std::size_t idx, bool up) { p_->set_re
 void craft_cluster_server::force_subquorum(std::vector< std::size_t > keep) { p_->force_subquorum(std::move(keep)); }
 void craft_cluster_server::clear_faults() { p_->clear_faults(); }
 void craft_cluster_server::set_delay(std::size_t idx, std::chrono::milliseconds d) { p_->set_delay(idx, d); }
-std::size_t craft_cluster_server::connections_accepted() const {
-    return p_->accepted.load(std::memory_order_relaxed);
-}
+std::size_t craft_cluster_server::connections_accepted() const { return p_->accepted.load(std::memory_order_relaxed); }
 std::size_t craft_cluster_server::journal_slots(std::size_t idx) const { return p_->journal_slots(idx); }
 uint64_t craft_cluster_server::replica_term(std::size_t idx) const { return p_->replica_term(idx); }
 bool craft_cluster_server::read_replica(std::size_t idx, int64_t read_lsn, uint64_t addr, uint64_t len,

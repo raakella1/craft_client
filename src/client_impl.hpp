@@ -40,7 +40,9 @@ class craft_client {
 public:
     craft_client(std::vector< std::shared_ptr< craft_replica > > replicas, uint32_t leader = 0,
                  uint32_t max_inflight = 128) :
-            replicas_(std::move(replicas)), leader_(leader), tracker_(std::make_shared< dlsn_tracker >(max_inflight)) {}
+            replicas_(std::move(replicas)),
+            leader_(leader),
+            tracker_(std::make_shared< dlsn_tracker >(max_inflight)) {}
 
     // Mid-session verbs carry the caller's queue ring (`q`, null = the blocking tier) straight through to every
     // backend leg they fan out -- one IO's whole leg chain rides one ring, so its resumptions all land back on

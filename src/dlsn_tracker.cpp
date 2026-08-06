@@ -284,7 +284,7 @@ async_result< read_plan > dlsn_tracker::plan_read(uint64_t addr, uint64_t len) {
             gate_.leave();
             break;
         }
-        co_await *ev;
+        co_await* ev;
         gate_.leave();
     }
     if (p.degraded()) co_return std::unexpected(make_error_condition(craft_error::NO_QUORUM));

@@ -29,7 +29,8 @@ namespace craft {
 class local_cluster {
 public:
     explicit local_cluster(MemReplicaGroup&& group) :
-            group_{std::move(group)}, backends_(group_.replicas.begin(), group_.replicas.end()) {}
+            group_{std::move(group)},
+            backends_(group_.replicas.begin(), group_.replicas.end()) {}
     // ~MemReplicaGroup (inside group_) drains the reference pools while it still owns every replica.
 
     std::vector< std::shared_ptr< craft_replica > > const& backends() const { return backends_; }

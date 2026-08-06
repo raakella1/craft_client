@@ -35,7 +35,8 @@
 #include <string>
 #include <vector>
 
-#include <craft/client.hpp> // result types
+#include <craft/client.hpp>  // async result types
+#include <craft/types.hpp>   // result types
 #include "craft_peer.hpp"    // the PEER plane: craft_peer + JournalSlot + lba_t (this model is its only implementer)
 #include "craft_replica.hpp" // the CLIENT plane: the craft_replica interface
 
@@ -117,6 +118,9 @@ struct session_info {
     uint64_t client_token;
 };
 
+struct SyncRSCommitLSNMsg;
+struct InternalLoginMsg;
+
 // enable_shared_from_this: a write the transport timed out is delivered late, from the transport's timer
 // thread. That closure must hold a WEAK reference here (a strong one would cycle: replica -> net_ -> closure
 // -> replica), so the replica must be reachable as a shared_ptr. It always is; make_mem_replica_group is the
@@ -133,7 +137,7 @@ public:
     static constexpr std::size_t k_missing_sample = 16;
 
     MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net);
-    MemCraftReplica(server_geometry geo);
+    explicit MemCraftReplica(server_geometry geo);
 
     ~MemCraftReplica();
 
@@ -291,11 +295,8 @@ private:
     void cold_truncate_above(int64_t rs_commit_lsn);
 
     // real hooks using raft channel
-    void apply_sync(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn, uint64_t client_token,
-                    std::vector< int64_t > const& empty_slots);
+    void apply_sync(boost::uuids::uuid const& vol_uuid, SyncRSCommitLSNMsg m);
     result< LoginResult > apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term);
-    // void apply_logout();
-    // void apply_truncate_above(int64_t rs_commit_lsn);
 
     // Misc helpers
     void init();
@@ -305,7 +306,7 @@ private:
     resolve_and_apply(boost::uuids::uuid const& vol_uuid, int64_t watermark, uint64_t client_token, uint64_t term);
     result< void > sync_rs_commit_lsn(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn, uint64_t client_token,
                                       uint64_t term);
-    void internal_login(uint64_t client_token, uint64_t term);
+    void internal_login(InternalLoginMsg m);
 
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.

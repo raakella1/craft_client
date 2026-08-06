@@ -58,11 +58,13 @@ bool is_response(uint8_t op_code) noexcept {
 }
 
 bool op_allows_body(uint8_t op_code) noexcept {
-    return op_code == static_cast< uint8_t >(op::write) ||    // data
-        op_code == static_cast< uint8_t >(op::login_rsp) ||   // member list
-        op_code == static_cast< uint8_t >(op::read_rsp) ||    // extents + data
-        op_code == static_cast< uint8_t >(op::resolve_rsp) || // Empty-verdict dLSN list
-        op_code == static_cast< uint8_t >(op::create_volume); // member list
+    return op_code == static_cast< uint8_t >(op::write) ||      // data
+        op_code == static_cast< uint8_t >(op::login_rsp) ||     // member list
+        op_code == static_cast< uint8_t >(op::read_rsp) ||      // extents + data
+        op_code == static_cast< uint8_t >(op::resolve_rsp) ||   // Empty-verdict dLSN list
+        op_code == static_cast< uint8_t >(op::create_volume) || // member list
+        op_code == static_cast< uint8_t >(op::fetch_data) ||    // lsns
+        op_code == static_cast< uint8_t >(op::fetch_data_rsp);  // slot_count x fetch_slot_desc + data
 }
 
 namespace {

@@ -27,16 +27,18 @@ std::error_condition net_to_error(net_error e) {
 }
 } // namespace
 
-CraftTcpPeer::CraftTcpPeer(std::string host, uint16_t port, peer_id_t id, uint32_t page_size,
-                           std::chrono::milliseconds op_timeout) :
-        host_{std::move(host)}, port_{port}, id_{id}, page_size_{page_size}, op_timeout_{op_timeout} {}
+CraftTcpPeer::CraftTcpPeer(std::string host, uint16_t port, peer_id_t id, std::chrono::milliseconds op_timeout) :
+        host_{std::move(host)},
+        port_{port},
+        id_{id},
+        op_timeout_{op_timeout} {}
 
 CraftTcpPeer::~CraftTcpPeer() = default;
 
 bool CraftTcpPeer::ensure_connected() {
     if (connected_) return true;
-    auto c = craft_conn::connect(host_, port_, op_timeout_ > std::chrono::milliseconds{0} ? op_timeout_
-                                                                                          : k_connect_timeout);
+    auto c =
+        craft_conn::connect(host_, port_, op_timeout_ > std::chrono::milliseconds{0} ? op_timeout_ : k_connect_timeout);
     if (!c) return false;
     conn_ = std::move(*c);
     connected_ = true;
@@ -112,7 +114,16 @@ async_result< std::vector< JournalSlot > > CraftTcpPeer::fetch_data(std::vector<
     out_slots.reserve(rsp.slot_count);
     std::size_t data_off = desc_bytes;
 
+    // --- Parsing assumptions ---
+    // Layout: the response body is N fixed-size `fetch_slot_desc` headers laid out contiguously
+    //    starting at offset 0 (server writes all descriptors first, then all slot data after —
+    //    see fetch_data handler), so descriptor i lives at byte offset i * sizeof(fetch_slot_desc).
+    //    This is NOT self-describing in the response; it's an assumed layout convention shared by
+    //    both peers. If the wire format ever interleaves descriptors and data, this indexing breaks
+    //    silently with no compiler or protocol-level signal.
     for (std::size_t i = 0; i < rsp.slot_count; ++i) {
+        std::size_t const desc_off = i * sizeof(wire::fetch_slot_desc);
+        if (desc_off + sizeof(wire::fetch_slot_desc) > parsed->body.size()) { co_return fail(craft_error::INTERNAL); }
         auto const sd = wire::decode< wire::fetch_slot_desc >(parsed->body.subspan(i * sizeof(wire::fetch_slot_desc)));
 
         JournalSlot js;
@@ -123,7 +134,7 @@ async_result< std::vector< JournalSlot > > CraftTcpPeer::fetch_data(std::vector<
         js.all_zeros = sd.all_zeros != 0;
 
         if (!js.is_empty && !js.all_zeros) {
-            std::size_t const nbytes = static_cast< std::size_t >(sd.len) * page_size_;
+            std::size_t const nbytes = static_cast< std::size_t >(sd.byte_len);
             if (data_off + nbytes > parsed->body.size()) co_return fail(craft_error::INTERNAL);
 
             js.owned_data = std::make_shared< std::vector< uint8_t > >(parsed->body.begin() + data_off,

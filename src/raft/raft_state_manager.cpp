@@ -125,4 +125,4 @@ void raft_state_mgr::permanent_destroy() {}
 
 void raft_state_mgr::leave() {}
 
-}
+} // namespace craft
