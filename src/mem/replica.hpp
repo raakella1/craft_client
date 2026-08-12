@@ -35,16 +35,18 @@
 #include <string>
 #include <vector>
 
-#include <craft/client.hpp>  // async result types
-#include <craft/types.hpp>   // result types
+#include <craft/client.hpp> // result types
 #include "craft_peer.hpp"    // the PEER plane: craft_peer + JournalSlot + lba_t (this model is its only implementer)
 #include "craft_replica.hpp" // the CLIENT plane: the craft_replica interface
 
 namespace craft {
 
 class MemTransport; // in-process network + cold path
+class RaftReplica;  // raft based replica server
 
 using sisl::ok;
+template < typename T >
+using result = sisl::result< T >;
 using status = sisl::status;
 
 // Per-partition CRAFT state, internal to a replica implementation. Authoritative in memory; a production replica
@@ -104,23 +106,6 @@ struct replica_faults {
     std::chrono::milliseconds delay{0}; // injected network latency to this replica
 };
 
-// The server's per-volume geometry -- what LOGIN advertises; the replica's journal/index is built from it.
-struct server_geometry {
-    uint64_t capacity;
-    uint32_t lba_size;
-    replica_endpoint ep;
-    uint32_t max_tx;
-};
-
-// for srv helo validation
-struct session_info {
-    uint64_t term;
-    uint64_t client_token;
-};
-
-struct SyncRSCommitLSNMsg;
-struct InternalLoginMsg;
-
 // enable_shared_from_this: a write the transport timed out is delivered late, from the transport's timer
 // thread. That closure must hold a WEAK reference here (a strong one would cycle: replica -> net_ -> closure
 // -> replica), so the replica must be reachable as a shared_ptr. It always is; make_mem_replica_group is the
@@ -129,17 +114,14 @@ struct InternalLoginMsg;
 // accident of the model: a real replica is exactly the thing that can answer both "serve this client's read" and
 // "hand a peer the journal slot it is Missing". A client-side transport proxy (CraftTcpReplica) implements only
 // craft_replica, because a client never asks a peer question.
-class MemCraftReplica final : public craft_replica,
-                              public craft_peer,
-                              public std::enable_shared_from_this< MemCraftReplica > {
+class MemCraftReplica : public craft_replica,
+                        public craft_peer,
+                        public std::enable_shared_from_this< MemCraftReplica > {
 public:
     // How many Missing dLSNs stats() lists individually. The count is always exact.
     static constexpr std::size_t k_missing_sample = 16;
 
     MemCraftReplica(replica_endpoint ep, uint32_t page_size, std::shared_ptr< MemTransport > net);
-    explicit MemCraftReplica(server_geometry geo);
-
-    ~MemCraftReplica();
 
     // Snapshot this replica's state. Takes mu_ and deliberately does NOT consult net_: do_write() locks
     // the transport before mu_, so reading net_ under mu_ here would invert that order. Callers that want
@@ -189,7 +171,7 @@ public:
     async_result< lsn_pair > get_rs_commit_lsn(uint64_t term, bool is_login) override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
 
-    peer_id_t id() const override { return geo_.ep.id; } // craft_replica
+    peer_id_t id() const override { return ep_.id; } // craft_replica
 
     // ── local-server surface: drive this replica directly, with an EXTERNAL transport (the TCP frontend,
     // craft_tcp_server, or any real network) as the wire. Each wraps a synchronous core WITHOUT a
@@ -210,24 +192,14 @@ public:
     // The standalone (one-process = one-replica) resolution round: itself lacking a slot IS the quorum-lacks
     // evidence at N=1, so every hole <= upto is verdicted Empty and the frontier advances through it.
     result< resolution_result > srv_resolve(client_hdr hdr, int64_t upto) { return do_resolve_local(hdr, upto); }
-    result< LoginResult > srv_establish(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token,
-                                        uint64_t term) {
-        return apply_login(volume_id, client_token, term);
-    }
+    void srv_establish(uint64_t client_token, uint64_t term) { cold_apply_login(client_token, term); }
     void srv_end() { cold_apply_logout(); }
     lsn_pair srv_lsns() { return peek_lsns(); }
-
-    result< void > srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                     std::vector< replica_endpoint > const& members);
-    result< lsn_pair > srv_get_rs_commit_lsn(uint64_t term, bool is_login) {
-        return do_get_rs_commit_lsn(term, is_login);
-    }
-    result< std::vector< JournalSlot > > srv_fetch_data(std::vector< int64_t > const& lsns) { return do_fetch(lsns); }
-    session_info srv_session_info(std::array< uint8_t, 16 > const& volume_id) const;
 
 private:
     friend class MemTransport; // the cold path drives the cold_* / peek helpers below directly, and the IO
                                // path (send_*) reads fault_snapshot() to decide deliverability / latency
+    friend class RaftReplica;  // tcp server backed replica that uses the MemCraftReplica as the foundation
 
     // The IO path's view of this replica's faults: one acquire load, no lock. Hold the returned pointer for the
     // whole of one op so its checks (up / write_ok / delay) see a consistent snapshot (a superseded one is
@@ -251,7 +223,6 @@ private:
         std::shared_ptr< std::vector< uint8_t > > buf; // one page at buf->data()+off
         std::size_t off{0};
     };
-    class RaftCommitWorker;
 
     // Synchronous cores: the SERVER. Each takes mu_. Deliverability, latency and payload ownership are the
     // transport's job (MemTransport::send_*), which is why nothing below consults net_ or copies bytes.
@@ -261,11 +232,12 @@ private:
     result< read_result > do_read(client_hdr hdr, int64_t read_lsn, uint64_t addr, uint64_t len, sisl::sg_list dest);
     result< lsn_pair > do_keep_alive(client_hdr hdr);
     result< lsn_pair > do_lsns();
-    result< lsn_pair > do_get_rs_commit_lsn(uint64_t term, bool is_login);
     status do_truncate(int64_t lsn);
-    result< std::vector< JournalSlot > > do_fetch(std::vector< int64_t > const& lsns);
     result< resolution_result > do_resolve_local(client_hdr hdr, int64_t upto); // N=1 resolution (srv seam)
+protected:
+    result< std::vector< JournalSlot > > do_fetch(std::vector< int64_t > const& lsns);
 
+private:
     // ── on-ring transport (a verb's non-null `q`) ──
     // ring_delay suspends the calling leg on a timeout/nop SQE placed on `q`; the reap loop's
     // complete_cqe_state resumes it. The ring is a parameter, not a member: each leg rides the ring its verb
@@ -288,31 +260,21 @@ private:
     // cold-path hooks used by MemTransport (each takes mu_)
     lsn_pair peek_lsns();
     void cold_apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
-    void cold_apply_login(uint64_t client_token, uint64_t term);
     void cold_apply_logout();
-    void cold_truncate_above(int64_t rs_commit_lsn);
-
-    // real hooks using raft channel
-    void apply_sync(boost::uuids::uuid const& vol_uuid, SyncRSCommitLSNMsg m);
-    result< LoginResult > apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token, uint64_t term);
-
-    // Misc helpers
-    void init();
-    MemJournalSlot to_mem_journal_slot(JournalSlot const& j, uint64_t term);
-    std::vector< int64_t > get_missing_slots(int64_t watermark);
-    std::pair< std::vector< int64_t >, int64_t >
-    resolve_and_apply(boost::uuids::uuid const& vol_uuid, int64_t watermark, uint64_t client_token, uint64_t term);
-    result< void > sync_rs_commit_lsn(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn, uint64_t client_token,
-                                      uint64_t term);
-    void internal_login(InternalLoginMsg m);
+    
 
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.
     std::optional< MemJournalSlot > peek_slot(int64_t dlsn); // copy of the slot, or nullopt if absent
-    void cold_install_slot(int64_t dlsn, MemJournalSlot s);  // fill a hole; never overwrites an entry
+    
     void cold_mark_empty(int64_t dlsn);                      // Empty verdict tombstone; overwrites held
                                                              // data (reconciliation: Empty beats data)
     std::vector< int64_t > peek_empties(int64_t upto);       // every is_empty dLSN <= upto
+
+protected:
+    void cold_apply_login(uint64_t client_token, uint64_t term);
+    void cold_truncate_above(int64_t rs_commit_lsn);
+    void cold_install_slot(int64_t dlsn, MemJournalSlot s);  // fill a hole; never overwrites an entry
 
     // Test observability: how many reads this replica actually served. Lets a test witness read routing
     // (e.g. round-robin distribution across members). Not part of the CRAFT surface.
@@ -327,19 +289,15 @@ private:
     std::mutex fault_mu_;                                                  // serializes mutators only
     std::vector< std::unique_ptr< replica_faults const > > fault_retired_; // guarded by fault_mu_
 
-    server_geometry geo_;
+protected:
+    replica_endpoint ep_;
+    uint32_t page_size_;
     std::shared_ptr< MemTransport > net_;
 
     CraftPartitionState state_;
     std::map< int64_t, MemJournalSlot > journal_; // dLSN -> slot (out-of-order arrival tolerated)
     std::map< lba_t, IndexCell > index_;          // applied prefix (<= commit_lsn); an absent LBA is a hole
     mutable std::mutex mu_;
-
-    std::atomic< int64_t > rs_commit_lsn_{-1};
-    std::mutex login_mu_;
-    std::condition_variable login_cv_;
-    bool login_done_{false};
-    std::unique_ptr< RaftCommitWorker > commit_worker_;
 };
 
 } // namespace craft

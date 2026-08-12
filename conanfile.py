@@ -62,6 +62,7 @@ class CraftClientConan(ConanFile):
 
     def build_requirements(self):
         self.test_requires("gtest/[^1.17]")
+        self.test_requires("nuraft_mesg/[^5.0]@oss/dev")
 
     def requirements(self):
         # craft_wire is a std-only leaf and needs nothing. craft_types / craft_client (added as they land) pull
@@ -69,7 +70,6 @@ class CraftClientConan(ConanFile):
         # declared here so the package graph is right from the start.
         self.requires("sisl/[^14.8]@oss/dev", transitive_headers=True)
         self.requires("liburing/[^2.4]", transitive_headers=True)
-        self.requires("nuraft_mesg/[^5.0]@oss/dev", transitive_headers=True)
 
     def validate(self):
         if self.info.settings.compiler.cppstd:
@@ -171,26 +171,7 @@ class CraftClientConan(ConanFile):
             "liburing::liburing",
         ]
 
-        self.cpp_info.components["craft_replica_mgr"].libs = ["craft_replica_mgr"]
-        self.cpp_info.components["craft_replica_mgr"].requires = [
-            "craft_types",
-            "craft_wire",
-            "nuraft_mesg::nuraft_mesg",
-        ]
-
-        self.cpp_info.components["craft_raft_service"].libs = [
-            "raft_service"
-        ]  # actual CMake target name
-        self.cpp_info.components["craft_raft_service"].requires = [
-            "craft_types",
-            "sisl::sisl",
-            "nuraft_mesg::nuraft_mesg",
-            "craft_replica_mgr",
-        ]
-
         self.cpp_info.components["craft_reference"].libs = ["craft_reference"]
         self.cpp_info.components["craft_reference"].requires = [
             "craft_client",
-            "craft_raft_service",
-            "craft_replica_mgr",
         ]

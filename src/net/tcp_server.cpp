@@ -14,7 +14,7 @@
  *********************************************************************************/
 
 // This is the reference TCP server: it backs the server with the reference model
-// (MemCraftReplica) and speaks its domain types (client_hdr, lsn_pair, io_extent, craft_error). It references
+// (RaftReplica) and speaks its domain types (client_hdr, lsn_pair, io_extent, craft_error). It references
 // no homestore SYMBOL, so it still links without the engine (see test_craft_tcp).
 
 #include "net/tcp_server.hpp"
@@ -24,7 +24,7 @@
 
 #include <sisl/logging/logging.h> // server-side r/w trace (base module; visible with -v trace / when a consumer inits logging)
 
-#include "mem/replica.hpp"  // the full MemCraftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
+#include "raft/raft_replica.hpp" // the full RaftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
 #include <craft/status.hpp> // to_wire_status (the shared wire <-> craft_error bridge)
 #include "raft/raft_service.hpp"
 #include "replica_mgr.hpp"
@@ -39,20 +39,20 @@ std::span< uint8_t const > as_bytes(T const& v) {
 }
 } // namespace
 
-craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& server_config_file) : max_tx_{geo.max_tx} {
-    LOGINFO("craft_tcp_server: starting [id={}] config_file='{}'", boost::uuids::to_string(geo.ep.id),
-            server_config_file);
+craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& server_config_file) : geo_{std::move(geo)} {
+    auto ep = replica_endpoint{.id = to_uuid(geo_.member.id), .addr = geo_.member.addr};
+    LOGINFO("craft_tcp_server: starting [id={}] config_file='{}'", boost::uuids::to_string(ep.id), server_config_file);
     // net == nullptr: this replica serves exclusively through its srv_* seam (the TCP frontend IS the wire).
     // start replica service and raft service if server_config_file is provided
     if (!server_config_file.empty()) {
-        replica_manager::instance()->start_replica_service(server_config_file, geo.ep.id);
-        raft_service::instance()->start_raft_service(geo.ep.id);
-        LOGINFO("craft_tcp_server: replica_manager + raft_service started [id={}]", boost::uuids::to_string(geo.ep.id));
+        replica_manager::instance()->start_replica_service(server_config_file, ep.id);
+        raft_service::instance()->start_raft_service(ep.id);
+        LOGINFO("craft_tcp_server: replica_manager + raft_service started [id={}]", boost::uuids::to_string(ep.id));
     } else {
         LOGINFO("craft_tcp_server: no server_config_file given -- running in standalone/cold-path mode [id={}]",
-                boost::uuids::to_string(geo.ep.id));
+                boost::uuids::to_string(ep.id));
     }
-    replica_ = std::make_shared< MemCraftReplica >(std::move(geo));
+    replica_ = std::make_shared< RaftReplica >(std::move(ep), geo_.lba_size, geo_.max_tx);
 }
 
 craft_tcp_server::~craft_tcp_server() = default;
@@ -75,12 +75,12 @@ void craft_tcp_server::log_stats() const {
 void craft_tcp_server::serve(craft_conn conn) {
     LOGDEBUG("craft_srv: connection accepted, serving");
     for (;;) {
-        auto msg = conn.recv_message(max_tx_);
+        auto msg = conn.recv_message(geo_.max_tx);
         if (!msg) {
             LOGDEBUG("craft_srv: connection closed (peer closed, or framing error)");
             return; // peer closed, or a framing error -- done with this connection
         }
-        auto parsed = wire::parse_message(*msg, max_tx_);
+        auto parsed = wire::parse_message(*msg, geo_.max_tx);
         if (!parsed) {
             LOGWARN("craft_srv: malformed message, resetting connection");
             return;
@@ -150,11 +150,11 @@ void craft_tcp_server::on_login(craft_conn& conn, wire::message const& req) {
         return;
     }
     wire::login_rsp rsp{};
-    rsp.term = srv_rsp.term;
+    rsp.term = session_term_;
     rsp.dlsn = srv_rsp.dLSN;
-    rsp.capacity = srv_rsp.capacity;
-    rsp.lba_size = srv_rsp.lba_size;
-    rsp.max_tx = srv_rsp.max_tx;
+    rsp.capacity = geo_.capacity;
+    rsp.lba_size = geo_.lba_size;
+    rsp.max_tx = geo_.max_tx;
     rsp.member_count = static_cast< uint32_t >(srv_rsp.members.size());
 
     std::vector< uint8_t > body;
