@@ -33,11 +33,19 @@
 #include <craft/wire.hpp>
 
 namespace craft {
-class MemCraftReplica; // the server's state backing (pimpl; included only in craft_tcp_server.cpp)
-struct server_geometry;
+struct replica_endpoint;
+class RaftReplica; // the server's state backing (pimpl; included only in craft_tcp_server.cpp)
 } // namespace craft
 
 namespace craft::net {
+
+// The server's per-volume geometry -- what LOGIN advertises; the replica's journal/index is built from it.
+struct server_geometry {
+    uint64_t capacity = 0;
+    uint32_t lba_size = 0;
+    uint32_t max_tx = 0;
+    wire::member member;
+};
 
 class craft_tcp_server {
 public:
@@ -57,8 +65,8 @@ public:
     void log_stats() const;
 
 private:
-    uint32_t max_tx_;
-    std::shared_ptr< MemCraftReplica > replica_; // the real state; driven via its srv_* local-server seam
+    server_geometry geo_;
+    std::shared_ptr< RaftReplica > replica_;     // the real state; driven via its srv_* local-server seam
     uint64_t next_term_ = 0;                     // monotonic term source; a fresh LOGIN takes ++next_term_
     uint64_t session_term_ = 0;                  // the current session's term, stamped on every IO
     bool session_active_ = false;                // false before LOGIN / after LOGOUT -> IO is fenced

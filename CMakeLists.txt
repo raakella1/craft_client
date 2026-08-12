@@ -57,6 +57,17 @@ target_include_directories(craft_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(craft_client PUBLIC craft_wire craft_types sisl::sisl liburing::liburing)
 target_compile_features(craft_client PUBLIC cxx_std_23)
 
+# ── craft_reference: the in-memory reference model and the local cluster builder used by the client
+add_library(craft_reference STATIC
+  src/mem/replica.cpp
+  src/mem/cluster.cpp
+  src/local.cpp # craft/local.hpp: the public "no-remote, in-process" backend builder over the mem model
+)
+target_include_directories(craft_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(craft_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # the internal headers it implements
+target_link_libraries(craft_reference PUBLIC craft_client)
+target_compile_features(craft_reference PUBLIC cxx_std_23)
+
 # ── craft_replica_mgr: the internal replica manager (testing only) ──
 add_library(craft_replica_mgr STATIC
   src/replica_mgr.cpp
@@ -66,7 +77,6 @@ target_include_directories(craft_replica_mgr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(craft_replica_mgr PUBLIC craft_client)
 target_compile_features(craft_replica_mgr PUBLIC cxx_std_23)
 
-# ── craft_reference: the in-memory reference model + loopback cluster server (test-support only) ──
 add_library(raft_service STATIC
   src/raft/raft_service.cpp
   src/raft/in_memory_log_store.cpp
@@ -76,23 +86,27 @@ target_include_directories(raft_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(raft_service PUBLIC nuraft_mesg::proto craft_replica_mgr)
 target_compile_features(raft_service PUBLIC cxx_std_23)
 
-add_library(craft_reference STATIC
-  src/mem/replica.cpp
-  src/mem/cluster.cpp
-  src/local.cpp # craft/local.hpp: the public "no-remote, in-process" backend builder over the mem model
-  src/net/cluster_server.cpp
+add_library(raft_tcp_server STATIC
+  src/raft/raft_replica.cpp
   src/net/tcp_server.cpp)
-target_include_directories(craft_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_include_directories(craft_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # the internal headers it implements
-target_link_libraries(craft_reference PUBLIC raft_service)
-target_compile_features(craft_reference PUBLIC cxx_std_23)
-
+target_include_directories(raft_tcp_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(raft_tcp_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(raft_tcp_server PUBLIC craft_reference craft_replica_mgr raft_service)
+target_compile_features(raft_tcp_server PUBLIC cxx_std_23)
+  
 # ── craft_reference_tcp_srv: a STANDALONE single-replica reference server. Run N of them on different ports to
 # form a multi-process cluster; point a client (ublkpp_disk --craft-tcp) at them. Test/dev support, not installed.
-add_executable(craft_reference_tcp_srv tools/craft_reference_tcp_srv.cpp)
-target_link_libraries(craft_reference_tcp_srv PRIVATE craft_reference)
+add_executable(craft_reference_tcp_srv src/net/tcp_server.cpp tools/craft_reference_tcp_srv.cpp)
+target_link_libraries(craft_reference_tcp_srv PRIVATE raft_tcp_server)
 target_include_directories(craft_reference_tcp_srv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # net/tcp_server.hpp
 target_compile_features(craft_reference_tcp_srv PRIVATE cxx_std_23)
+
+add_library(cluster_server STATIC
+  src/net/cluster_server.cpp)
+target_include_directories(cluster_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(cluster_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(cluster_server PUBLIC craft_reference)
+target_compile_features(cluster_server PUBLIC cxx_std_23)
 
 # ── tests ──
 add_executable(test_wire test/test_wire.cpp)
@@ -106,20 +120,21 @@ add_test(NAME CraftTypes COMMAND test_types)
 
 # Behavioral suites: link the libs under test + the shared sisl-logging main (direct object, not gtest_main).
 function(craft_test name)
-  add_executable(${name} test/${name}.cpp test/craft_test_main.cpp)
-  target_link_libraries(${name} PRIVATE ${ARGN} GTest::gmock)
+  cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
+  add_executable(${name} test/${name}.cpp test/craft_test_main.cpp ${ARG_SOURCES})
+  target_link_libraries(${name} PRIVATE ${ARG_UNPARSED_ARGUMENTS} GTest::gmock)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
 craft_test(test_api          craft_reference) # the PUBLIC surface, and ONLY it -- the canary that include/ suffices
-craft_test(test_tcp_builder  craft_reference) # craft/tcp.hpp: connect() a client to a reference server
+craft_test(test_tcp_builder  cluster_server) # craft/tcp.hpp: connect() a client to a reference server
 craft_test(test_memory       craft_reference)
 craft_test(test_dlsn_tracker craft_client)
-craft_test(test_cluster      craft_reference)
-craft_test(test_tcp          craft_reference)
-craft_test(test_tcp_replica  craft_reference)
+craft_test(test_cluster      cluster_server)
+craft_test(test_tcp          raft_tcp_server)
+craft_test(test_tcp_replica  cluster_server)
 craft_test(test_async_mem    craft_reference) # the on-ring async transport (prepare_for_async) driven at depth
-craft_test(test_async_tcp    craft_reference) # the on-ring TCP transport (recv-demux pump) over real loopback sockets
+craft_test(test_async_tcp    cluster_server) # the on-ring TCP transport (recv-demux pump) over real loopback sockets
 
 # Every suite EXCEPT test_wire / test_types / test_api reaches an internal header under src/ -- the reference
 # model, the TCP server/proxy, the craft_replica interface, the dlsn_tracker. That is the point of the split:
@@ -138,7 +153,7 @@ function(craft_test_ownmain name)
 endfunction()
 
 craft_test_ownmain(test_client     craft_reference)
-craft_test_ownmain(test_client_tcp craft_reference)
+craft_test_ownmain(test_client_tcp cluster_server)
 # white-box: these two reach the concrete craft_client + read_route_map (internal headers under src/)
 target_include_directories(test_client     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(test_client_tcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

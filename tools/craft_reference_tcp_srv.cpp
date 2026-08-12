@@ -39,7 +39,6 @@
 
 #include <craft/net/conn.hpp>
 #include "net/tcp_server.hpp"
-#include "mem/replica.hpp"
 #include <craft/wire.hpp>
 
 // A 0 default means "unset" -> resolved in code (capacity to 1 GiB, max_tx to the single-sourced wire default), so
@@ -112,11 +111,11 @@ int main(int argc, char** argv) {
 
     // Advertise this one replica in login_rsp. The id is cosmetic here (the client routes by index, and HELO
     // fences by term, not id) -- a fresh random id is fine; the client's --craft-tcp supplies its own members.
-    auto geo =
-        craft::server_geometry{.capacity = capacity,
-                               .lba_size = lba_size,
-                               .ep = craft::replica_endpoint{.id = id, .addr = fmt::format("127.0.0.1:{}", port)},
-                               .max_tx = max_tx};
+    craft::wire::member self{};
+    std::copy(id.begin(), id.end(), self.id.begin());
+    self.addr = fmt::format("127.0.0.1:{}", port);
+    auto geo = craft::net::server_geometry{
+        .capacity = capacity, .lba_size = lba_size, .max_tx = max_tx, .member = std::move(self)};
     craft::net::craft_tcp_server server{std::move(geo), server_config_file};
 
     // sigaction WITHOUT SA_RESTART: glibc's signal() sets SA_RESTART, which auto-restarts the blocking accept()

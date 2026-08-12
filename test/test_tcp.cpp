@@ -31,7 +31,6 @@
 #include <craft/net/conn.hpp>
 #include "net/wire_client.hpp"
 #include "net/tcp_server.hpp"
-#include "mem/replica.hpp"
 
 using namespace craft::net;
 namespace wire = craft::wire;
@@ -40,13 +39,16 @@ namespace {
 
 constexpr uint32_t k_lba = 4096;
 
-craft::server_geometry make_geo() {
-    boost::uuids::uuid ep_id{};
-    ep_id.data[0] = 0x01;
-    return craft::server_geometry{.capacity = uint64_t{1} << 30,
-                                  .lba_size = k_lba,
-                                  .ep = {.id = ep_id, .addr = "127.0.0.1:0"},
-                                  .max_tx = 512 * 1024};
+craft::net::server_geometry make_geo() {
+    craft::wire::member self{};
+    self.addr = "127.0.0.1:0";
+    self.id[0] = 0x01;
+    return craft::net::server_geometry{
+        .capacity = uint64_t{1} << 30,
+        .lba_size = k_lba,
+        .max_tx = 512 * 1024,
+        .member = std::move(self),
+    };
 }
 
 // A per-byte-nonzero pattern of `n` bytes -- nonzero so no 4 KiB page collapses to a hole on the read path
