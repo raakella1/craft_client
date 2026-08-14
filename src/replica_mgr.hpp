@@ -15,13 +15,6 @@ namespace craft {
 
 // One member's full identity + reachability, everything replica_manager needs to answer both raft's
 // lookup_peer and the wire-plane peer client from a single source of truth.
-struct replica_info {
-    boost::uuids::uuid id{};
-    std::string host;
-    uint16_t raft_port{0};
-    uint16_t tcp_port{0};
-    std::shared_ptr< net::CraftTcpPeer > peer_client{nullptr};
-};
 
 // Process-wide registry: peer identity -> reachability, and (lazily) the open peer-plane connection to it.
 // Replaces peer_comm::peer_lookup_map_ and net::peer_client_service's addrs_/peers_ split -- one map for

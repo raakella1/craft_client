@@ -31,8 +31,8 @@ public:
     bool is_raft_enabled() { return consensus_ != nullptr; }
     consensus_handle get_consensus();
     void start_raft_service(boost::uuids::uuid const& server_uuid);
-    result< void > srv_create_volume(boost::uuids::uuid const& group_id,
-                                     std::vector< replica_endpoint > const& members);
+    result< void > srv_create_partition(boost::uuids::uuid const& group_id,
+                                        std::vector< replica_endpoint > const& members);
     void add_commit_cb(raft_commit_cb_t cb);
     bool is_leader(nuraft_mesg::group_id_t const& group_id);
     nuraft_mesg::peer_id_t leader_id(nuraft_mesg::group_id_t const& group_id);

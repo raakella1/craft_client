@@ -15,7 +15,7 @@
 
 #include "raft/raft_replica.hpp"
 #include "raft/raft_service.hpp" // for raft channel
-#include "replica_mgr.hpp"
+#include "registry_mgr.hpp"
 #include "raft/raft_state_machine.hpp" // for raft message payload types
 #include "helper.hpp"
 #include "craft/types.hpp"
@@ -48,6 +48,28 @@ std::shared_ptr< std::vector< uint8_t > > take_payload(sisl::sg_list const& s) {
 }
 
 constexpr auto LoginWaitTime = std::chrono::seconds(2);
+
+struct replica_info {
+    boost::uuids::uuid id{};
+    std::string host;
+    uint16_t raft_port{0};
+    uint16_t tcp_port{0};
+    std::shared_ptr< net::CraftTcpPeer > peer_client{nullptr};
+};
+
+using partition_peers_list_t = std::vector< boost::uuids::uuid >;
+
+std::string partition_peers_list_key(boost::uuids::uuid const& partition_id){return fmt::format("partition_{}", )}
+
+partition_peers_list_t peer_list(boost::uuids::uuid const& partition_id) {
+    partition_peers_list_t peers;
+    if (auto peers_ptr =
+            registry_manager::instance()->get< partition_peers_list_t >(partition_peers_list_key(partition_id));
+        peers_ptr) {
+        peers = *peers_ptr;
+    }
+    return peers;
+}
 
 } // namespace
 
@@ -84,14 +106,52 @@ private:
     }
 };
 
-RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx) : MemCraftReplica{std::move(ep), page_size, nullptr},
-                                                max_tx_{max_tx} {
-    // register raft callbacks
-    // do not block commit thread, offload the business logic to the commit_worker
+std::string replica_info_key() const { return fmt::format("replica_info_{}", boost::uuids::to_string(ep_.id)); }
+
+void RaftReplica::replics_init(std::string const& replica_config_path) {
+    auto registry = registry_manager::instance();
+    if (auto const rinfo = registry->get< replica_info >(replica_info_key())) {
+        // recovery from registry
+        return;
+    }
+
+    std::ifstream istrm(replica_config_path, std::ios::binary);
+    if (!istrm.is_open()) {
+        LOGERROR("Could not open {}", replica_config_path);
+        return;
+    }
+
+    nlohmann::json j;
+    try {
+        istrm >> j;
+    } catch (nlohmann::json::parse_error const& e) {
+        LOGERROR("Could not parse {}: {}", replica_config_path, e.what());
+        return;
+    }
+
+    for (auto const& m : j.at("members")) {
+        auto const id = boost::uuids::string_generator()(m.at("uuid").get< std::string >());
+        auto r = std::make_shared< replica_info >(
+            id,
+            replica_info{
+                .id = id,
+                .host = m.at("host").get< std::string >(),
+                .raft_port = m.at("raft_port").get< uint16_t >(),
+                .tcp_port = m.at("tcp_port").get< uint16_t >(),
+                .peer_client = (id == ep_.id)
+                    ? nullptr
+                    : std::make_shared< net::CraftTcpPeer >(m.at("host").get< std::string >(),
+                                                            m.at("tcp_port").get< uint16_t >(), id),
+            });
+        registry->put(replica_info_key(), std::move(r));
+    }
+}
+
+void RaftReplica::raft_init() {
     auto raft_inst = raft_service::instance();
     if (!raft_inst->is_raft_enabled()) { return; }
-    auto commit_cb = [this](uint64_t log_idx, nlohmann::json const& j, std::string const& vol_uuid_str) {
-        auto const vol_uuid = boost::uuids::string_generator()(vol_uuid_str);
+    auto commit_cb = [this](uint64_t log_idx, nlohmann::json const& j, std::string const& partition_uuid_str) {
+        auto const partition_uuid = boost::uuids::string_generator()(partition_uuid_str);
         auto const op_val = j.at("op").get< int >();
         switch (static_cast< Operation >(op_val)) {
         case Operation::SyncRSCommitLSN: {
@@ -102,10 +162,10 @@ RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_t
                 LOGERROR("commit[{}]: malformed SyncRSCommitLSN: {}", log_idx, e.what());
                 return;
             }
-            LOGDEBUG("commit[{}][vol={}]: applying SyncRSCommitLSN rs_commit_lsn={} empty_slots={}", log_idx,
-                     boost::uuids::to_string(vol_uuid), m.rs_commit_lsn, m.empty_slots.size());
+            LOGDEBUG("commit[{}][partition={}]: applying SyncRSCommitLSN rs_commit_lsn={} empty_slots={}", log_idx,
+                     boost::uuids::to_string(partition_uuid), m.rs_commit_lsn, m.empty_slots.size());
             commit_worker_->push_task(
-                [this, vol_uuid, m = std::move(m)]() mutable { apply_sync(vol_uuid, std::move(m)); });
+                [this, partition_uuid, m = std::move(m)]() mutable { apply_sync(partition_uuid, std::move(m)); });
             break;
         }
         case Operation::InternalLogin: {
@@ -116,9 +176,9 @@ RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_t
                 LOGERROR("commit[{}]: malformed InternalLogin: {}", log_idx, e.what());
                 return;
             }
-            LOGDEBUG("commit[{}][vol={}]: applying InternalLogin term={} client_token={}", log_idx,
-                     boost::uuids::to_string(vol_uuid), m.term, m.client_token);
-            commit_worker_->push_task([this, vol_uuid, m = std::move(m)]() mutable { internal_login(m); });
+            LOGDEBUG("commit[{}][partition={}]: applying InternalLogin term={} client_token={}", log_idx,
+                     boost::uuids::to_string(partition_uuid), m.term, m.client_token);
+            commit_worker_->push_task([this, partition_uuid, m = std::move(m)]() mutable { internal_login(m); });
             break;
         }
         default:
@@ -136,6 +196,14 @@ RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_t
     commit_worker_ = std::make_unique< RaftReplica::RaftCommitWorker >();
     LOGDEBUG("RaftReplica constructed [id={}] lba_size={}", boost::uuids::to_string(ep_.id),
              page_size_);
+}
+
+RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx,
+                         std::string const& replica_config_path) :
+        MemCraftReplica{std::move(ep), page_size, nullptr},
+        max_tx_{max_tx} {
+    replica_init(replica_config_path);
+    raft_init();
 }
 
 RaftReplica::~RaftReplica() = default;
@@ -186,13 +254,18 @@ std::vector< int64_t > RaftReplica::get_missing_slots(int64_t watermark) {
     return missing;
 }
 
-std::pair< std::vector< int64_t >, int64_t > RaftReplica::resolve_and_apply(boost::uuids::uuid const& vol_uuid,
-                                                                                int64_t watermark,
-                                                                                uint64_t client_token, uint64_t term) {
-    auto const peers = replica_manager::instance()->get_volume(vol_uuid);
+std::pair< std::vector< int64_t >, int64_t > RaftReplica::resolve_and_apply(boost::uuids::uuid const& partition_uuid,
+                                                                            int64_t watermark, uint64_t client_token,
+                                                                            uint64_t term) {
+    auto const peers = peer_list(partition_uuid);
+    if (peers.empty()) {
+        LOGERROR("resolve_and_apply[partition={}]: no peers found in registry",
+                 boost::uuids::to_string(partition_uuid));
+        return {{}, watermark}; // every lsn is stalled
+    }
     auto const missing_lsns = get_missing_slots(watermark);
-    LOGDEBUG("resolve_and_apply[vol={}] watermark={} missing={} peers={}", boost::uuids::to_string(vol_uuid), watermark,
-             missing_lsns.size(), peers.size());
+    LOGDEBUG("resolve_and_apply[partition={}] watermark={} missing={} peers={}",
+             boost::uuids::to_string(partition_uuid), watermark, missing_lsns.size(), peers.size());
     if (missing_lsns.empty()) { return {{}, -1}; }
 
     // Brute force, no optimizations for now
@@ -203,8 +276,8 @@ std::pair< std::vector< int64_t >, int64_t > RaftReplica::resolve_and_apply(boos
         if (auto r = sisl::async::sync_get(peer.peer_client->fetch_data(missing_lsns)); r) {
             all_responses.emplace_back(std::move(r.value()));
         } else {
-            LOGWARN("resolve_and_apply[vol={}]: fetch_data to peer {} failed/unreachable, error: {}",
-                    boost::uuids::to_string(vol_uuid), boost::uuids::to_string(peer.id), r.error().message());
+            LOGWARN("resolve_and_apply[partition={}]: fetch_data to peer {} failed/unreachable, error: {}",
+                    boost::uuids::to_string(partition_uuid), boost::uuids::to_string(peer.id), r.error().message());
         }
     }
 
@@ -239,41 +312,41 @@ std::pair< std::vector< int64_t >, int64_t > RaftReplica::resolve_and_apply(boos
         }
     }
     if (stalled_lsn != -1) {
-        LOGWARN("resolve_and_apply[vol={}]: could not resolve past lsn={} (quorum-lacks evidence insufficient)",
-                boost::uuids::to_string(vol_uuid), stalled_lsn);
+        LOGWARN("resolve_and_apply[partition={}]: could not resolve past lsn={} (quorum-lacks evidence insufficient)",
+                boost::uuids::to_string(partition_uuid), stalled_lsn);
     } else {
-        LOGDEBUG("resolve_and_apply[vol={}]: fully resolved up to watermark={}, empty_slots={}",
-                 boost::uuids::to_string(vol_uuid), watermark, empty_slots.size());
+        LOGDEBUG("resolve_and_apply[partition={}]: fully resolved up to watermark={}, empty_slots={}",
+                 boost::uuids::to_string(partition_uuid), watermark, empty_slots.size());
     }
     return {empty_slots, stalled_lsn};
 }
 
-result< void > RaftReplica::sync_rs_commit_lsn(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn,
-                                                   uint64_t client_token, uint64_t term) {
-    auto const [empty_slots, stalled_lsn] = resolve_and_apply(vol_uuid, rs_commit_lsn, client_token, term);
+result< void > RaftReplica::sync_rs_commit_lsn(boost::uuids::uuid const& partition_uuid, int64_t rs_commit_lsn,
+                                               uint64_t client_token, uint64_t term) {
+    auto const [empty_slots, stalled_lsn] = resolve_and_apply(partition_uuid, rs_commit_lsn, client_token, term);
     if (stalled_lsn != -1) {
         // leader could not resolve all the missing lsns
-        LOGERROR("sync_rs_commit_lsn[vol={}]: leader could not resolve all missing lsns, stalled at {}",
-                 boost::uuids::to_string(vol_uuid), stalled_lsn);
+        LOGERROR("sync_rs_commit_lsn[partition={}]: leader could not resolve all missing lsns, stalled at {}",
+                 boost::uuids::to_string(partition_uuid), stalled_lsn);
         return std::unexpected(make_error_condition(craft_error::INTERNAL));
     }
-    if (auto const r = raft_service::instance()->propose(vol_uuid,
+    if (auto const r = raft_service::instance()->propose(partition_uuid,
                                                          SyncRSCommitLSNMsg{.rs_commit_lsn = rs_commit_lsn,
                                                                             .client_token = client_token,
                                                                             .empty_slots = std::move(empty_slots)});
         !r) {
         // TODO: any cleanup required?
-        LOGERROR("sync_rs_commit_lsn[vol={}]: propose(SyncRSCommitLSN={}) failed: {}",
-                 boost::uuids::to_string(vol_uuid), rs_commit_lsn, r.error().message());
+        LOGERROR("sync_rs_commit_lsn[partition={}]: propose(SyncRSCommitLSN={}) failed: {}",
+                 boost::uuids::to_string(partition_uuid), rs_commit_lsn, r.error().message());
         return std::unexpected(r.error());
     }
-    LOGINFO("sync_rs_commit_lsn[vol={}]: proposed rs_commit_lsn={} OK", boost::uuids::to_string(vol_uuid),
+    LOGINFO("sync_rs_commit_lsn[partition={}]: proposed rs_commit_lsn={} OK", boost::uuids::to_string(partition_uuid),
             rs_commit_lsn);
     return {};
 }
 
-result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token,
-                                                   uint64_t term) {
+result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& partition_id, uint64_t client_token,
+                                               uint64_t term) {
     auto raft_service_inst = raft_service::instance();
     // A note on dlsn: The login WATERMARK: the last dLSN already durable (-1 on a fresh replica), NOT the next one
     // to use -- the client derives next_dlsn_ = dlsn + 1 itself. This used to send last_append_lsn + 1,
@@ -294,12 +367,12 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
     // Phase 1: collect replica LSN state (non-RAFT broadcast)
     // 1.1: accepted by leader only.
     // TODO: what happens if the leader changes before the login is complete?
-    auto vol_uuid = craft::to_uuid(volume_id);
-    LOGINFO("Login request, vol id {}, token {}, new session {}", boost::uuids::to_string(vol_uuid), client_token,
+    auto partition_uuid = craft::to_uuid(partition_id);
+    LOGINFO("Login request, vol id {}, token {}, new session {}", boost::uuids::to_string(partition_uuid), client_token,
             term);
-    if (!raft_service_inst->is_leader(vol_uuid)) {
+    if (!raft_service_inst->is_leader(partition_uuid)) {
         LOGERROR("current replica not a raft leader");
-        return LoginResult{{}, -1, 0, 0, 0, raft_service_inst->leader_id(vol_uuid)};
+        return LoginResult{{}, -1, 0, 0, 0, raft_service_inst->leader_id(partition_uuid)};
     }
 
     // 1.2 collect replica LSN state (non-RAFT broadcast)
@@ -311,35 +384,35 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
         peer_resp.emplace_back(lsn_pair{state_.commit_lsn, state_.last_append_lsn});
     }
 
-    auto const members = replica_manager::instance()->get_volume(vol_uuid);
-    LOGDEBUG("apply_login[vol={}]: polling {} member(s) for GetRSCommitLSN", boost::uuids::to_string(vol_uuid),
-             members.size());
+    auto const members = peer_list(partition_uuid);
+    LOGDEBUG("apply_login[partition={}]: polling {} member(s) for GetRSCommitLSN",
+             boost::uuids::to_string(partition_uuid), members.size());
     for (auto const& m : members) {
         if (m.id == ep_.id) { continue; }
         if (auto r = sisl::async::sync_get(m.peer_client->get_rs_commit_lsn(current_term, true /* is_login */)); r) {
-            LOGDEBUG("apply_login[vol={}]: peer {} reported commit_lsn={} last_append_lsn={}",
-                     boost::uuids::to_string(vol_uuid), boost::uuids::to_string(m.id), r->commit_lsn,
+            LOGDEBUG("apply_login[partition={}]: peer {} reported commit_lsn={} last_append_lsn={}",
+                     boost::uuids::to_string(partition_uuid), boost::uuids::to_string(m.id), r->commit_lsn,
                      r->last_append_lsn);
             peer_resp.emplace_back(r.value());
         } else {
-            LOGWARN("apply_login[vol={}]: peer {} did not respond to GetRSCommitLSN", boost::uuids::to_string(vol_uuid),
-                    boost::uuids::to_string(m.id));
+            LOGWARN("apply_login[partition={}]: peer {} did not respond to GetRSCommitLSN",
+                    boost::uuids::to_string(partition_uuid), boost::uuids::to_string(m.id));
         }
     }
     // compute watermark as max(quorum.last_append)
     if (peer_resp.size() <= members.size() / 2) {
-        LOGERROR("apply_login[vol={}]: quorum not reached ({} of {} responded)", boost::uuids::to_string(vol_uuid),
-                 peer_resp.size(), members.size());
+        LOGERROR("apply_login[partition={}]: quorum not reached ({} of {} responded)",
+                 boost::uuids::to_string(partition_uuid), peer_resp.size(), members.size());
         return std::unexpected(make_error_condition(craft_error::NO_QUORUM));
     }
     auto const rs_commit_lsn = std::ranges::max_element(peer_resp, {}, &lsn_pair::last_append_lsn)->last_append_lsn;
-    LOGINFO("apply_login[vol={}]: computed rs_commit_lsn={} from {} responder(s)", boost::uuids::to_string(vol_uuid),
-            rs_commit_lsn, peer_resp.size());
+    LOGINFO("apply_login[partition={}]: computed rs_commit_lsn={} from {} responder(s)",
+            boost::uuids::to_string(partition_uuid), rs_commit_lsn, peer_resp.size());
 
     // Phase 1b: Leader behind - resolve all the missing lsns and
     // Phase 2: SyncRSCommitLSN() via RAFT (data NOT in log)
-    if (auto const r = sync_rs_commit_lsn(vol_uuid, rs_commit_lsn, client_token, current_term); !r) {
-        LOGERROR("apply_login[vol={}]: sync_rs_commit_lsn failed: {}", boost::uuids::to_string(vol_uuid),
+    if (auto const r = sync_rs_commit_lsn(partition_uuid, rs_commit_lsn, client_token, current_term); !r) {
+        LOGERROR("apply_login[partition={}]: sync_rs_commit_lsn failed: {}", boost::uuids::to_string(partition_uuid),
                  r.error().message());
         return std::unexpected(r.error());
     }
@@ -350,15 +423,16 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
         login_done_ = false;
     }
     if (auto const r = raft_service_inst->propose(
-            vol_uuid, InternalLoginMsg{.client_token = client_token, .term = term, .rs_commit_lsn = rs_commit_lsn});
+            partition_uuid,
+            InternalLoginMsg{.client_token = client_token, .term = term, .rs_commit_lsn = rs_commit_lsn});
         !r) {
         // TODO: any cleanup required?
-        LOGERROR("apply_login[vol={}]: propose(InternalLogin term={}) failed: {}", boost::uuids::to_string(vol_uuid),
-                 term, r.error().message());
+        LOGERROR("apply_login[partition={}]: propose(InternalLogin term={}) failed: {}",
+                 boost::uuids::to_string(partition_uuid), term, r.error().message());
         return std::unexpected(r.error());
     }
-    LOGDEBUG("apply_login[vol={}]: InternalLogin(term={}) proposed, waiting for commit",
-             boost::uuids::to_string(vol_uuid), term);
+    LOGDEBUG("apply_login[partition={}]: InternalLogin(term={}) proposed, waiting for commit",
+             boost::uuids::to_string(partition_uuid), term);
 
     // Phase 4: truncate above rs_commit_lsn
     // This happens in the internal login commit. Wait until that happens.
@@ -366,8 +440,8 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
         std::unique_lock< std::mutex > lk(login_mu_);
         login_cv_.wait_for(lk, LoginWaitTime, [&] { return login_done_; });
         if (!login_done_) {
-            LOGERROR("apply_login[vol={}]: timed out waiting for InternalLogin(term={}) commit callback",
-                     boost::uuids::to_string(vol_uuid), term);
+            LOGERROR("apply_login[partition={}]: timed out waiting for InternalLogin(term={}) commit callback",
+                     boost::uuids::to_string(partition_uuid), term);
             return std::unexpected(make_error_condition(craft_error::INTERNAL));
         }
     }
@@ -376,37 +450,39 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
     for (auto const& m : members) {
         replicas.emplace_back(replica_endpoint{.id = m.id, .addr = fmt::format("{}:{}", m.host, m.tcp_port)});
     }
-    LOGINFO("apply_login[vol={}]: LOGIN SUCCESS term={} dLSN={} members={}", boost::uuids::to_string(vol_uuid), term,
-            rs_commit_lsn, replicas.size());
+    LOGINFO("apply_login[partition={}]: LOGIN SUCCESS term={} dLSN={} members={}",
+            boost::uuids::to_string(partition_uuid), term, rs_commit_lsn, replicas.size());
     return LoginResult{.members = replicas,
                        .dLSN = rs_commit_lsn};
 }
 
 // create peer raft group and add members to it.
-result< void > RaftReplica::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                                  std::vector< replica_endpoint > const& members) {
-    auto const vol_uuid = craft::to_uuid(volume_id);
-    auto const& repl_mgr = replica_manager::instance();
-    // return success if the volume exists
-    if (auto const vol = repl_mgr->get_volume(vol_uuid); !vol.empty()) {
-        LOGINFO("Volume {} exists! Returning ok", boost::uuids::to_string(vol_uuid));
+result< void > RaftReplica::srv_create_partition(std::array< uint8_t, 16 > const& partition_id,
+                                                 std::vector< replica_endpoint > const& members) {
+    auto const partition_uuid = craft::to_uuid(partition_id);
+    auto const& registry = registry_manager::instance();
+    // return success if the partition exists
+    if (auto const p = registry->get< partition_peers_list_t >(partition_peers_list_key(partition_uuid)); !p.empty()) {
+        LOGINFO("Partition {} exists! Returning ok", boost::uuids::to_string(partition_uuid));
         return {};
     }
-    LOGINFO("srv_create_volume[vol={}]: creating with {} member(s)", boost::uuids::to_string(vol_uuid), members.size());
+    LOGINFO("srv_create_partition[partition={}]: creating with {} member(s)", boost::uuids::to_string(partition_uuid),
+            members.size());
 
-    auto const r = raft_service::instance()->srv_create_volume(vol_uuid, members);
+    auto const r = raft_service::instance()->srv_create_partition(partition_uuid, members);
     if (r) {
-        repl_mgr->register_volume(vol_uuid, members);
-        LOGINFO("srv_create_volume[vol={}]: SUCCESS", boost::uuids::to_string(vol_uuid));
+        registry->put< partition_peers_list_t >(partition_peers_list_key(partition_uuid), members);
+        LOGINFO("srv_create_partition[partition={}]: SUCCESS", boost::uuids::to_string(partition_uuid));
     } else {
-        LOGERROR("srv_create_volume[vol={}]: FAILED: {}", boost::uuids::to_string(vol_uuid), r.error().message());
+        LOGERROR("srv_create_partition[partition={}]: FAILED: {}", boost::uuids::to_string(partition_uuid),
+                 r.error().message());
     }
     return r;
 }
 
 // Follower-side catch-up on SyncRSCommitLSN apply. Verdicts are already decided by the leader (empty_slots)
 // -- this never decides Empty itself, only obeys the verdict list or fetches real data.
-void RaftReplica::apply_sync(boost::uuids::uuid const& vol_uuid, SyncRSCommitLSNMsg m) {
+void RaftReplica::apply_sync(boost::uuids::uuid const& partition_uuid, SyncRSCommitLSNMsg m) {
     // Verdicts first -- permanent no-ops, no fetch needed.
     for (auto lsn : m.empty_slots)
         cold_mark_empty(lsn);
@@ -418,7 +494,10 @@ void RaftReplica::apply_sync(boost::uuids::uuid const& vol_uuid, SyncRSCommitLSN
     }
 
     auto missing = get_missing_slots(m.rs_commit_lsn);
-    auto const peers = replica_manager::instance()->get_volume(vol_uuid);
+    auto const peers = peer_list(partition_uuid);
+    if (peers.empty()) {
+        LOGERROR("apply_sync[partition={}]: no peers found in registry", boost::uuids::to_string(partition_uuid));
+    }
     for (auto const& peer : peers) {
         if (missing.empty()) break;
         if (peer.id == ep_.id) continue; // don't ask self
@@ -439,16 +518,16 @@ void RaftReplica::apply_sync(boost::uuids::uuid const& vol_uuid, SyncRSCommitLSN
     }
 
     if (!missing.empty()) {
-        LOGERROR("apply_sync[vol={}]: still missing {} slot(s) <= {} after asking all peers; commit_lsn will "
+        LOGERROR("apply_sync[partition={}]: still missing {} slot(s) <= {} after asking all peers; commit_lsn will "
                  "stall until the next SyncRSCommitLSN round -- first missing={}",
-                 boost::uuids::to_string(vol_uuid), missing.size(), m.rs_commit_lsn, missing.front());
+                 boost::uuids::to_string(partition_uuid), missing.size(), m.rs_commit_lsn, missing.front());
     }
 
     std::lock_guard< std::mutex > g{mu_};
     apply_up_to(m.rs_commit_lsn);
     rs_commit_lsn_.store(m.rs_commit_lsn, std::memory_order_relaxed);
-    LOGDEBUG("apply_sync[vol={}]: done, commit_lsn now {} (target rs_commit_lsn={})", boost::uuids::to_string(vol_uuid),
-             state_.commit_lsn, m.rs_commit_lsn);
+    LOGDEBUG("apply_sync[partition={}]: done, commit_lsn now {} (target rs_commit_lsn={})",
+             boost::uuids::to_string(partition_uuid), state_.commit_lsn, m.rs_commit_lsn);
 }
 
 session_info RaftReplica::srv_session_info(std::array< uint8_t, 16 > const&) const {
@@ -457,8 +536,8 @@ session_info RaftReplica::srv_session_info(std::array< uint8_t, 16 > const&) con
 }
 
 void RaftReplica::internal_login(InternalLoginMsg m) {
-    cold_apply_login(m.client_token, m.term);
     if (m.rs_commit_lsn >= 0) { cold_truncate_above(m.rs_commit_lsn); }
+    cold_apply_login(m.client_token, m.term);
     {
         std::lock_guard< std::mutex > lk(login_mu_);
         login_done_ = true;

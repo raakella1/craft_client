@@ -64,10 +64,10 @@ raft_service::~raft_service() {
     }
 }
 
-result< void > raft_service::srv_create_volume(boost::uuids::uuid const& group_id,
-                                               std::vector< replica_endpoint > const& members) {
+result< void > raft_service::srv_create_partition(boost::uuids::uuid const& group_id,
+                                                  std::vector< replica_endpoint > const& members) {
     if (!consensus_) {
-        // raft_service::srv_create_volume should not be called if raft service is not enabled
+        // raft_service::srv_create_partition should not be called if raft service is not enabled
         LOGERROR("Raft not enabled!");
         return fail(craft_error::INTERNAL);
     }
@@ -130,7 +130,6 @@ void raft_service::add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::s
 void raft_service::add_commit_cb(raft_commit_cb_t cb) {
     // we expect that this is called only once
     if (!consensus_) {
-        // raft_service::srv_create_volume should not be called if raft service is not enabled
         LOGERROR("Raft not enabled!");
         return;
     }
@@ -139,7 +138,6 @@ void raft_service::add_commit_cb(raft_commit_cb_t cb) {
 
 bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
     if (!consensus_) {
-        // raft_service::srv_create_volume should not be called if raft service is not enabled
         LOGERROR("Raft not enabled!");
         return false;
     }
@@ -154,7 +152,6 @@ bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
 
 nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& group_id) {
     if (!consensus_) {
-        // raft_service::srv_create_volume should not be called if raft service is not enabled
         LOGERROR("Raft not enabled!");
         return {};
     }

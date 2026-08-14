@@ -68,14 +68,11 @@ target_include_directories(craft_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(craft_reference PUBLIC craft_client)
 target_compile_features(craft_reference PUBLIC cxx_std_23)
 
-# ── craft_replica_mgr: the internal replica manager (testing only) ──
-add_library(craft_replica_mgr STATIC
-  src/replica_mgr.cpp
-  src/net/tcp_peer.cpp)
-target_include_directories(craft_replica_mgr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_include_directories(craft_replica_mgr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(craft_replica_mgr PUBLIC craft_client)
-target_compile_features(craft_replica_mgr PUBLIC cxx_std_23)
+add_library(registry_mgr STATIC
+  src/registry_mgr.cpp)
+target_include_directories(registry_mgr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(registry_mgr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(registry_mgr PUBLIC cxx_std_23)
 
 add_library(raft_service STATIC
   src/raft/raft_service.cpp
@@ -83,7 +80,7 @@ add_library(raft_service STATIC
   src/raft/raft_state_manager.cpp)
 target_include_directories(raft_service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(raft_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(raft_service PUBLIC nuraft_mesg::proto craft_replica_mgr)
+target_link_libraries(raft_service PUBLIC nuraft_mesg::proto registry_mgr)
 target_compile_features(raft_service PUBLIC cxx_std_23)
 
 add_library(raft_tcp_server STATIC
@@ -91,7 +88,7 @@ add_library(raft_tcp_server STATIC
   src/net/tcp_server.cpp)
 target_include_directories(raft_tcp_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(raft_tcp_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(raft_tcp_server PUBLIC craft_reference craft_replica_mgr raft_service)
+target_link_libraries(raft_tcp_server PUBLIC craft_reference raft_service)
 target_compile_features(raft_tcp_server PUBLIC cxx_std_23)
   
 # ── craft_reference_tcp_srv: a STANDALONE single-replica reference server. Run N of them on different ports to
