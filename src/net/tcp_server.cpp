@@ -21,13 +21,13 @@
 
 #include <algorithm>
 #include <utility>
+#include <boost/uuid/uuid_io.hpp>
 
 #include <sisl/logging/logging.h> // server-side r/w trace (base module; visible with -v trace / when a consumer inits logging)
 
 #include "raft/raft_replica.hpp" // the full RaftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
-#include <craft/status.hpp> // to_wire_status (the shared wire <-> craft_error bridge)
 #include "raft/raft_service.hpp"
-#include "replica_mgr.hpp"
+#include <craft/status.hpp> // to_wire_status (the shared wire <-> craft_error bridge)
 #include "helper.hpp"
 
 namespace craft::net {
@@ -42,17 +42,7 @@ std::span< uint8_t const > as_bytes(T const& v) {
 craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& server_config_file) : geo_{std::move(geo)} {
     auto ep = replica_endpoint{.id = to_uuid(geo_.member.id), .addr = geo_.member.addr};
     LOGINFO("craft_tcp_server: starting [id={}] config_file='{}'", boost::uuids::to_string(ep.id), server_config_file);
-    // net == nullptr: this replica serves exclusively through its srv_* seam (the TCP frontend IS the wire).
-    // start replica service and raft service if server_config_file is provided
-    if (!server_config_file.empty()) {
-        replica_manager::instance()->start_replica_service(server_config_file, ep.id);
-        raft_service::instance()->start_raft_service(ep.id);
-        LOGINFO("craft_tcp_server: replica_manager + raft_service started [id={}]", boost::uuids::to_string(ep.id));
-    } else {
-        LOGINFO("craft_tcp_server: no server_config_file given -- running in standalone/cold-path mode [id={}]",
-                boost::uuids::to_string(ep.id));
-    }
-    replica_ = std::make_shared< RaftReplica >(std::move(ep), geo_.lba_size, geo_.max_tx);
+    replica_ = std::make_shared< RaftReplica >(std::move(ep), geo_.lba_size, geo_.max_tx, server_config_file);
 }
 
 craft_tcp_server::~craft_tcp_server() = default;
@@ -177,7 +167,7 @@ void craft_tcp_server::on_helo(craft_conn& conn, wire::message const& req) {
     auto const hr = wire::decode< wire::helo_req >(req.op_header);
     wire::status code = wire::status::ok;
 
-    if (bool is_raft_enabled = raft_service::instance()->is_raft_enabled(); !is_raft_enabled) {
+    if (!raft_service::instance()->is_raft_enabled()) {
         // no raft, follow fake cold path
         auto result = replica_->srv_establish(hr.volume_id, hr.client_token, session_term_);
         if (!result) {
@@ -363,8 +353,8 @@ void craft_tcp_server::on_create_volume(craft_conn& conn, wire::message const& r
             replica_members.emplace_back(replica_endpoint{.id = craft::to_uuid(m.id), .addr = m.addr});
         }
 
-        if (auto const r = replica_->srv_create_volume(cr.volume_id, replica_members); !r) {
-            LOGERROR("craft_srv CREATE_VOLUME [rid:{}]: srv_create_volume failed: {}", req.hdr.request_id,
+        if (auto const r = replica_->srv_create_partition(cr.volume_id, replica_members); !r) {
+            LOGERROR("craft_srv CREATE_VOLUME [rid:{}]: srv_create_partition failed: {}", req.hdr.request_id,
                      r.error().message());
             code = to_wire_status(r.error());
         }

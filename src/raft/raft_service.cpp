@@ -1,8 +1,8 @@
 #include <sisl/logging/logging.h>
 #include "raft_service.hpp"
 #include "raft_state_manager.hpp"
+#include "registry_mgr.hpp"
 #include "helper.hpp"
-#include "replica_mgr.hpp"
 
 #include <libnuraft/raft_params.hxx>
 #include <libnuraft/srv_config.hxx>
@@ -34,14 +34,14 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
     // raft global manager for commits
     nuraft::nuraft_global_mgr::init();
     std::call_once(raft_started_, [&] {
-        auto const& my_info = replica_manager::instance()->get(server_uuid);
+        auto my_info = registry_manager::instance()->get< raft_peer_t >(raft_service::peer_id_key(server_uuid));
         if (!my_info) {
             LOGERROR("Could not start raft service, unrecognized replica uuid {}", server_uuid);
             return;
         }
         auto params = nuraft_mesg::manager::params{
             .server_uuid_ = server_uuid,
-            .mesg_port_ = my_info->raft_port,
+            .mesg_port_ = my_info->second,
             .default_group_type_ = default_group_type_,
         };
         consensus_ = nuraft_mesg::init_messaging(params, weak_from_this(), true /*with_data_svc*/);
@@ -95,10 +95,12 @@ result< void > raft_service::srv_create_partition(boost::uuids::uuid const& grou
 }
 
 std::string raft_service::lookup_peer(nuraft_mesg::peer_id_t const& peer_id) {
-
-    auto peer_addr = replica_manager::instance()->lookup_peer(peer_id);
-    if (peer_addr.empty()) { LOGWARN("Peer {} not found in lookup map", boost::uuids::to_string(peer_id)); }
-    return peer_addr;
+    if (auto peer_addr = registry_manager::instance()->get< raft_peer_t >(raft_service::peer_id_key(peer_id));
+        peer_addr) {
+        return fmt::format("{}:{}", peer_addr->first, peer_addr->second);
+    }
+    LOGWARN("Peer {} not found in lookup map", boost::uuids::to_string(peer_id));
+    return {};
 }
 
 std::shared_ptr< nuraft_mesg::mesg_state_mgr > raft_service::create_state_mgr(int32_t const srv_id,

@@ -80,15 +80,16 @@ add_library(raft_service STATIC
   src/raft/raft_state_manager.cpp)
 target_include_directories(raft_service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(raft_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(raft_service PUBLIC nuraft_mesg::proto registry_mgr)
+target_link_libraries(raft_service PUBLIC nuraft_mesg::proto registry_mgr craft_reference)
 target_compile_features(raft_service PUBLIC cxx_std_23)
 
 add_library(raft_tcp_server STATIC
   src/raft/raft_replica.cpp
+  src/net/tcp_peer.cpp
   src/net/tcp_server.cpp)
 target_include_directories(raft_tcp_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(raft_tcp_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(raft_tcp_server PUBLIC craft_reference raft_service)
+target_link_libraries(raft_tcp_server PUBLIC raft_service)
 target_compile_features(raft_tcp_server PUBLIC cxx_std_23)
   
 # ── craft_reference_tcp_srv: a STANDALONE single-replica reference server. Run N of them on different ports to

@@ -70,7 +70,6 @@ private:
     void internal_login(InternalLoginMsg m);
     void raft_init();
     void replica_init(std::string const& replica_config_path);
-    std::string replica_info_key() const;
 
     uint32_t max_tx_;
     std::atomic< int64_t > rs_commit_lsn_{-1};

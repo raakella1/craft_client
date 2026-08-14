@@ -19,6 +19,7 @@
 #include "raft/raft_state_machine.hpp" // for raft message payload types
 #include "helper.hpp"
 #include "craft/types.hpp"
+#include "net/tcp_peer.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -27,7 +28,7 @@
 #include <chrono>
 #include <boost/uuid/string_generator.hpp>
 #include <queue>
-
+#include <ranges>
 
 #include <sisl/logging/logging.h>
 
@@ -57,18 +58,31 @@ struct replica_info {
     std::shared_ptr< net::CraftTcpPeer > peer_client{nullptr};
 };
 
+std::string replica_info_key(boost::uuids::uuid const& replica_id) {
+    return fmt::format("replica_info_{}", boost::uuids::to_string(replica_id));
+}
+
 using partition_peers_list_t = std::vector< boost::uuids::uuid >;
 
-std::string partition_peers_list_key(boost::uuids::uuid const& partition_id){return fmt::format("partition_{}", )}
+std::string partition_peers_list_key(boost::uuids::uuid const& partition_id) {
+    return fmt::format("partition_{}", boost::uuids::to_string(partition_id));
+}
 
-partition_peers_list_t peer_list(boost::uuids::uuid const& partition_id) {
+std::vector< replica_info > peer_list(boost::uuids::uuid const& partition_id) {
     partition_peers_list_t peers;
-    if (auto peers_ptr =
-            registry_manager::instance()->get< partition_peers_list_t >(partition_peers_list_key(partition_id));
-        peers_ptr) {
+    auto registry = registry_manager::instance();
+    if (auto peers_ptr = registry->get< partition_peers_list_t >(partition_peers_list_key(partition_id)); peers_ptr) {
         peers = *peers_ptr;
     }
-    return peers;
+    std::vector< replica_info > replica_members;
+    for (auto const& peer_id : peers) {
+        if (auto rinfo = registry->get< replica_info >(replica_info_key(peer_id)); rinfo) {
+            replica_members.emplace_back(*rinfo);
+        } else {
+            LOGWARN("Peer {} not found in registry", boost::uuids::to_string(peer_id));
+        }
+    }
+    return replica_members;
 }
 
 } // namespace
@@ -106,11 +120,13 @@ private:
     }
 };
 
-std::string replica_info_key() const { return fmt::format("replica_info_{}", boost::uuids::to_string(ep_.id)); }
-
-void RaftReplica::replics_init(std::string const& replica_config_path) {
+void RaftReplica::replica_init(std::string const& replica_config_path) {
+    if (replica_config_path.empty()) {
+        LOGWARN("No replica config path provided, skipping replica initialization");
+        return;
+    }
     auto registry = registry_manager::instance();
-    if (auto const rinfo = registry->get< replica_info >(replica_info_key())) {
+    if (auto const rinfo = registry->get< replica_info >(replica_info_key(ep_.id)); rinfo) {
         // recovery from registry
         return;
     }
@@ -131,24 +147,25 @@ void RaftReplica::replics_init(std::string const& replica_config_path) {
 
     for (auto const& m : j.at("members")) {
         auto const id = boost::uuids::string_generator()(m.at("uuid").get< std::string >());
-        auto r = std::make_shared< replica_info >(
-            id,
-            replica_info{
-                .id = id,
-                .host = m.at("host").get< std::string >(),
-                .raft_port = m.at("raft_port").get< uint16_t >(),
-                .tcp_port = m.at("tcp_port").get< uint16_t >(),
-                .peer_client = (id == ep_.id)
-                    ? nullptr
-                    : std::make_shared< net::CraftTcpPeer >(m.at("host").get< std::string >(),
-                                                            m.at("tcp_port").get< uint16_t >(), id),
-            });
-        registry->put(replica_info_key(), std::move(r));
+        auto r = std::make_shared< replica_info >(replica_info{
+            .id = id,
+            .host = m.at("host").get< std::string >(),
+            .raft_port = m.at("raft_port").get< uint16_t >(),
+            .tcp_port = m.at("tcp_port").get< uint16_t >(),
+            .peer_client = (id == ep_.id)
+                ? nullptr
+                : std::make_shared< net::CraftTcpPeer >(m.at("host").get< std::string >(),
+                                                        m.at("tcp_port").get< uint16_t >(), id),
+        });
+        registry->put< raft_peer_t >(raft_service::peer_id_key(id),
+                                     std::make_shared< raft_peer_t >(std::make_pair(r->host, r->raft_port)));
+        registry->put< replica_info >(replica_info_key(r->id), std::move(r));
     }
 }
 
 void RaftReplica::raft_init() {
     auto raft_inst = raft_service::instance();
+    raft_inst->start_raft_service(ep_.id);
     if (!raft_inst->is_raft_enabled()) { return; }
     auto commit_cb = [this](uint64_t log_idx, nlohmann::json const& j, std::string const& partition_uuid_str) {
         auto const partition_uuid = boost::uuids::string_generator()(partition_uuid_str);
@@ -462,7 +479,7 @@ result< void > RaftReplica::srv_create_partition(std::array< uint8_t, 16 > const
     auto const partition_uuid = craft::to_uuid(partition_id);
     auto const& registry = registry_manager::instance();
     // return success if the partition exists
-    if (auto const p = registry->get< partition_peers_list_t >(partition_peers_list_key(partition_uuid)); !p.empty()) {
+    if (auto p = registry->get< partition_peers_list_t >(partition_peers_list_key(partition_uuid)); p && !p->empty()) {
         LOGINFO("Partition {} exists! Returning ok", boost::uuids::to_string(partition_uuid));
         return {};
     }
@@ -471,7 +488,10 @@ result< void > RaftReplica::srv_create_partition(std::array< uint8_t, 16 > const
 
     auto const r = raft_service::instance()->srv_create_partition(partition_uuid, members);
     if (r) {
-        registry->put< partition_peers_list_t >(partition_peers_list_key(partition_uuid), members);
+        auto view = members | std::views::transform(&replica_endpoint::id);
+        std::vector< boost::uuids::uuid > peer_uuids(view.begin(), view.end());
+        registry->put< partition_peers_list_t >(partition_peers_list_key(partition_uuid),
+                                                std::make_shared< partition_peers_list_t >(std::move(peer_uuids)));
         LOGINFO("srv_create_partition[partition={}]: SUCCESS", boost::uuids::to_string(partition_uuid));
     } else {
         LOGERROR("srv_create_partition[partition={}]: FAILED: {}", boost::uuids::to_string(partition_uuid),

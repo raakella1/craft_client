@@ -14,6 +14,7 @@ class manager;
 }
 
 using consensus_handle = std::shared_ptr< nuraft_mesg::manager >;
+using raft_peer_t = std::pair< std::string, uint16_t >; // <host, raft_port>
 
 namespace craft {
 
@@ -25,6 +26,9 @@ class raft_state_mgr;
 class raft_service : public nuraft_mesg::messaging_application, public std::enable_shared_from_this< raft_service > {
 public:
     inline static const std::string default_group_type_{"raft_service_raft"};
+    inline static const std::string peer_id_key(boost::uuids::uuid const& peer_id) {
+        return fmt::format("raft_peer_{}", boost::uuids::to_string(peer_id));
+    }
 
     virtual ~raft_service();
     static std::shared_ptr< raft_service > instance();
