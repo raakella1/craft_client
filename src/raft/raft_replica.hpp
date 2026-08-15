@@ -70,9 +70,9 @@ private:
     void internal_login(InternalLoginMsg m);
     void raft_init();
     void replica_init(std::string const& replica_config_path);
+    void journal_init();
 
     uint32_t max_tx_;
-    std::atomic< int64_t > rs_commit_lsn_{-1};
     std::mutex login_mu_;
     std::condition_variable login_cv_;
     bool login_done_{false};

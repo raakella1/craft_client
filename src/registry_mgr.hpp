@@ -9,8 +9,6 @@ namespace craft {
 
 class registry_manager {
 public:
-    static std::shared_ptr< registry_manager > instance();
-
     template <typename T>
     void put(std::string const& key, std::shared_ptr<T> value) {
         std::lock_guard lock(component_mutex_);
@@ -28,8 +26,6 @@ public:
 
 
 private:
-    registry_manager() = default;
-
     mutable std::mutex component_mutex_;
     std::unordered_map<std::string, std::any> component_store_;
 };

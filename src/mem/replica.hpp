@@ -226,6 +226,9 @@ private:
         std::size_t off{0};
     };
 
+    using journal_t = std::map< int64_t, MemJournalSlot >;
+    using index_t = std::map< lba_t, IndexCell >;
+
     // Synchronous cores: the SERVER. Each takes mu_. Deliverability, latency and payload ownership are the
     // transport's job (MemTransport::send_*), which is why nothing below consults net_ or copies bytes.
     // do_write takes the payload already owned and adopts it; `bytes == nullptr` is a zero write.
@@ -297,8 +300,9 @@ protected:
     std::shared_ptr< MemTransport > net_;
 
     CraftPartitionState state_;
-    std::map< int64_t, MemJournalSlot > journal_; // dLSN -> slot (out-of-order arrival tolerated)
-    std::map< lba_t, IndexCell > index_;          // applied prefix (<= commit_lsn); an absent LBA is a hole
+    // shared_ptr for restart support using registry_manager.
+    std::shared_ptr< journal_t > journal_; // dLSN -> slot (out-of-order arrival tolerated)
+    std::shared_ptr< index_t > index_;     // applied prefix (<= commit_lsn); an absent LBA is a hole
     mutable std::mutex mu_;
 };
 

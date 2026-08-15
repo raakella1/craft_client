@@ -32,6 +32,8 @@
 
 #include <sisl/logging/logging.h>
 
+#define REGISTRY_KEY(prefix, id) fmt::format("{}_{}", prefix, boost::uuids::to_string(id))
+
 namespace craft {
 
 namespace {
@@ -49,6 +51,11 @@ std::shared_ptr< std::vector< uint8_t > > take_payload(sisl::sg_list const& s) {
 }
 
 constexpr auto LoginWaitTime = std::chrono::seconds(2);
+std::string const replica_info_key_prefix{"replica_info"};
+std::string const partition_info_key_prefix{"partition_info"};
+std::string const journal_key_prefix{"journal"};
+std::string const index_key_prefix{"index"};
+using partition_peers_list_t = std::vector< boost::uuids::uuid >;
 
 struct replica_info {
     boost::uuids::uuid id{};
@@ -58,25 +65,16 @@ struct replica_info {
     std::shared_ptr< net::CraftTcpPeer > peer_client{nullptr};
 };
 
-std::string replica_info_key(boost::uuids::uuid const& replica_id) {
-    return fmt::format("replica_info_{}", boost::uuids::to_string(replica_id));
-}
-
-using partition_peers_list_t = std::vector< boost::uuids::uuid >;
-
-std::string partition_peers_list_key(boost::uuids::uuid const& partition_id) {
-    return fmt::format("partition_{}", boost::uuids::to_string(partition_id));
-}
-
 std::vector< replica_info > peer_list(boost::uuids::uuid const& partition_id) {
     partition_peers_list_t peers;
     auto registry = registry_manager::instance();
-    if (auto peers_ptr = registry->get< partition_peers_list_t >(partition_peers_list_key(partition_id)); peers_ptr) {
+    if (auto peers_ptr = registry->get< partition_peers_list_t >(REGISTRY_KEY(partition_info_key_prefix, partition_id));
+        peers_ptr) {
         peers = *peers_ptr;
     }
     std::vector< replica_info > replica_members;
     for (auto const& peer_id : peers) {
-        if (auto rinfo = registry->get< replica_info >(replica_info_key(peer_id)); rinfo) {
+        if (auto rinfo = registry->get< replica_info >(REGISTRY_KEY(replica_info_key_prefix, peer_id)); rinfo) {
             replica_members.emplace_back(*rinfo);
         } else {
             LOGWARN("Peer {} not found in registry", boost::uuids::to_string(peer_id));
@@ -126,7 +124,7 @@ void RaftReplica::replica_init(std::string const& replica_config_path) {
         return;
     }
     auto registry = registry_manager::instance();
-    if (auto const rinfo = registry->get< replica_info >(replica_info_key(ep_.id)); rinfo) {
+    if (auto const rinfo = registry->get< replica_info >(REGISTRY_KEY(replica_info_key_prefix, ep_.id)); rinfo) {
         // recovery from registry
         return;
     }
@@ -159,12 +157,16 @@ void RaftReplica::replica_init(std::string const& replica_config_path) {
         });
         registry->put< raft_peer_t >(raft_service::peer_id_key(id),
                                      std::make_shared< raft_peer_t >(std::make_pair(r->host, r->raft_port)));
-        registry->put< replica_info >(replica_info_key(r->id), std::move(r));
+        registry->put< replica_info >(REGISTRY_KEY(replica_info_key_prefix, r->id), std::move(r));
     }
 }
 
 void RaftReplica::raft_init() {
     auto raft_inst = raft_service::instance();
+    if (raft_inst->is_raft_enabled()) {
+        LOGINFO("RAFT already initialized for replica {}", boost::uuids::to_string(ep_.id));
+        return;
+    }
     raft_inst->start_raft_service(ep_.id);
     if (!raft_inst->is_raft_enabled()) { return; }
     auto commit_cb = [this](uint64_t log_idx, nlohmann::json const& j, std::string const& partition_uuid_str) {
@@ -204,23 +206,37 @@ void RaftReplica::raft_init() {
         }
     };
 
-    auto group_create_cb = [this](boost::uuids::uuid const& group_id) {
-
-    };
     raft_inst->add_commit_cb(std::move(commit_cb));
-
-    // start background commit offload worker
-    commit_worker_ = std::make_unique< RaftReplica::RaftCommitWorker >();
     LOGDEBUG("RaftReplica constructed [id={}] lba_size={}", boost::uuids::to_string(ep_.id),
              page_size_);
+}
+
+void RaftReplica::journal_init() {
+    auto registry = registry_manager::instance();
+    if (auto existing = registry->get< journal_t >(REGISTRY_KEY(journal_key_prefix, ep_.id)); !existing) {
+        LOGINFO("No journal found in registry for replica {}", boost::uuids::to_string(ep_.id));
+        registry->put< journal_t >(REGISTRY_KEY(journal_key_prefix, ep_.id), journal_);
+    } else {
+        LOGINFO("Journal found in registry for replica {}, loading into memory", boost::uuids::to_string(ep_.id));
+        journal_ = existing;
+    }
+    if (auto existing = registry->get< index_t >(REGISTRY_KEY(index_key_prefix, ep_.id)); !existing) {
+        LOGINFO("No index found in registry for replica {}", boost::uuids::to_string(ep_.id));
+        registry->put< index_t >(REGISTRY_KEY(index_key_prefix, ep_.id), index_);
+    } else {
+        LOGINFO("Index found in registry for replica {}, loading into memory", boost::uuids::to_string(ep_.id));
+        index_ = existing;
+    }
 }
 
 RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx,
                          std::string const& replica_config_path) :
         MemCraftReplica{std::move(ep), page_size, nullptr},
-        max_tx_{max_tx} {
+        max_tx_{max_tx},
+        commit_worker_{std::make_unique< RaftReplica::RaftCommitWorker >()} {
     replica_init(replica_config_path);
     raft_init();
+    journal_init();
 }
 
 RaftReplica::~RaftReplica() = default;
@@ -258,8 +274,8 @@ std::vector< int64_t > RaftReplica::get_missing_slots(int64_t watermark) {
     std::lock_guard< std::mutex > g{mu_};
     std::vector< int64_t > missing;
     int64_t expect = state_.commit_lsn + 1;
-    auto it = journal_.lower_bound(expect); // first present entry >= expect
-    for (; it != journal_.end() && it->first <= watermark; ++it) {
+    auto it = journal_->lower_bound(expect); // first present entry >= expect
+    for (; it != journal_->end() && it->first <= watermark; ++it) {
         for (; expect < it->first; ++expect)
             missing.push_back(expect); // gap before this entry
         expect = it->first + 1;
@@ -479,7 +495,8 @@ result< void > RaftReplica::srv_create_partition(std::array< uint8_t, 16 > const
     auto const partition_uuid = craft::to_uuid(partition_id);
     auto const& registry = registry_manager::instance();
     // return success if the partition exists
-    if (auto p = registry->get< partition_peers_list_t >(partition_peers_list_key(partition_uuid)); p && !p->empty()) {
+    if (auto p = registry->get< partition_peers_list_t >(REGISTRY_KEY(partition_info_key_prefix, partition_uuid));
+        p && !p->empty()) {
         LOGINFO("Partition {} exists! Returning ok", boost::uuids::to_string(partition_uuid));
         return {};
     }
@@ -490,7 +507,7 @@ result< void > RaftReplica::srv_create_partition(std::array< uint8_t, 16 > const
     if (r) {
         auto view = members | std::views::transform(&replica_endpoint::id);
         std::vector< boost::uuids::uuid > peer_uuids(view.begin(), view.end());
-        registry->put< partition_peers_list_t >(partition_peers_list_key(partition_uuid),
+        registry->put< partition_peers_list_t >(REGISTRY_KEY(partition_info_key_prefix, partition_uuid),
                                                 std::make_shared< partition_peers_list_t >(std::move(peer_uuids)));
         LOGINFO("srv_create_partition[partition={}]: SUCCESS", boost::uuids::to_string(partition_uuid));
     } else {
@@ -545,7 +562,7 @@ void RaftReplica::apply_sync(boost::uuids::uuid const& partition_uuid, SyncRSCom
 
     std::lock_guard< std::mutex > g{mu_};
     apply_up_to(m.rs_commit_lsn);
-    rs_commit_lsn_.store(m.rs_commit_lsn, std::memory_order_relaxed);
+    state_.commit_lsn = m.rs_commit_lsn;
     LOGDEBUG("apply_sync[partition={}]: done, commit_lsn now {} (target rs_commit_lsn={})",
              boost::uuids::to_string(partition_uuid), state_.commit_lsn, m.rs_commit_lsn);
 }
