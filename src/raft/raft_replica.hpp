@@ -34,12 +34,16 @@ struct session_info {
     uint64_t client_token;
 };
 
+class registry_manager;
+class raft_service;
+
 struct SyncRSCommitLSNMsg;
 struct InternalLoginMsg;
 
 class RaftReplica final : public MemCraftReplica {
 public:
-    RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx, std::string const& replica_config_path);
+    RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx, std::string const& replica_config_path,
+                std::shared_ptr< registry_manager > registry_mgr, bool init_raft_service = false);
 
     ~RaftReplica();
 
@@ -79,6 +83,8 @@ private:
     
     class RaftCommitWorker;
     std::unique_ptr< RaftCommitWorker > commit_worker_;
+    std::shared_ptr< registry_manager > registry_mgr_;
+    std::shared_ptr< raft_service > raft_service_;
 };
 
 } // namespace craft

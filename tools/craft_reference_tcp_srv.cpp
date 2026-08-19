@@ -40,6 +40,7 @@
 #include <craft/net/conn.hpp>
 #include "net/tcp_server.hpp"
 #include <craft/wire.hpp>
+#include "registry_mgr.hpp"
 
 // A 0 default means "unset" -> resolved in code (capacity to 1 GiB, max_tx to the single-sourced wire default), so
 // no size magic number is duplicated in a CLI string.
@@ -116,7 +117,8 @@ int main(int argc, char** argv) {
     self.addr = fmt::format("127.0.0.1:{}", port);
     auto geo = craft::net::server_geometry{
         .capacity = capacity, .lba_size = lba_size, .max_tx = max_tx, .member = std::move(self)};
-    craft::net::craft_tcp_server server{std::move(geo), server_config_file};
+    craft::net::craft_tcp_server server{std::move(geo), server_config_file,
+                                        std::make_shared< craft::registry_manager >(), true /*init_raft_service*/};
 
     // sigaction WITHOUT SA_RESTART: glibc's signal() sets SA_RESTART, which auto-restarts the blocking accept()
     // after the handler runs, so the loop would never re-check g_stop and Ctrl-C could not stop the server. With

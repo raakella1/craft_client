@@ -23,24 +23,18 @@ static nuraft::ptr< nuraft::buffer > create_message(nlohmann::json const& j_obj)
     return buf;
 }
 
-std::shared_ptr< raft_service > raft_service::instance() {
-    static std::shared_ptr< raft_service > instance{new raft_service()};
-    return instance;
-}
-
-consensus_handle raft_service::get_consensus() { return consensus_; }
-
-void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
-    // raft global manager for commits
-    nuraft::nuraft_global_mgr::init();
+raft_service::raft_service(boost::uuids::uuid const& server_uuid, std::shared_ptr< registry_manager > registry_mgr) :
+        server_uuid_(server_uuid),
+        registry_mgr_(std::move(registry_mgr)) {
+    nuraft::nuraft_global_mgr::init(); // raft global manager for commits
     std::call_once(raft_started_, [&] {
-        auto my_info = registry_manager::instance()->get< raft_peer_t >(raft_service::peer_id_key(server_uuid));
+        auto my_info = registry_mgr_->get< raft_peer_t >(peer_id_key(server_uuid_));
         if (!my_info) {
             LOGERROR("Could not start raft service, unrecognized replica uuid {}", server_uuid);
             return;
         }
         auto params = nuraft_mesg::manager::params{
-            .server_uuid_ = server_uuid,
+            .server_uuid_ = server_uuid_,
             .mesg_port_ = my_info->second,
             .default_group_type_ = default_group_type_,
         };
@@ -51,7 +45,6 @@ void raft_service::start_raft_service(boost::uuids::uuid const& server_uuid) {
             .with_hb_interval(250)
             .with_rpc_failure_backoff(250);
         consensus_->register_mgr_type(default_group_type_, raft_params);
-        server_uuid_ = server_uuid;
         LOGINFO("Initialized raft_service for {} with raft consensus manager, port {}", params.server_uuid_,
                 params.mesg_port_);
     });
@@ -95,8 +88,7 @@ result< void > raft_service::srv_create_partition(boost::uuids::uuid const& grou
 }
 
 std::string raft_service::lookup_peer(nuraft_mesg::peer_id_t const& peer_id) {
-    if (auto peer_addr = registry_manager::instance()->get< raft_peer_t >(raft_service::peer_id_key(peer_id));
-        peer_addr) {
+    if (auto peer_addr = registry_mgr_->get< raft_peer_t >(peer_id_key(peer_id)); peer_addr) {
         return fmt::format("{}:{}", peer_addr->first, peer_addr->second);
     }
     LOGWARN("Peer {} not found in lookup map", boost::uuids::to_string(peer_id));

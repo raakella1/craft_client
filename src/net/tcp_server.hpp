@@ -35,6 +35,7 @@
 namespace craft {
 struct replica_endpoint;
 class RaftReplica; // the server's state backing (pimpl; included only in craft_tcp_server.cpp)
+class registry_manager;
 } // namespace craft
 
 namespace craft::net {
@@ -49,7 +50,9 @@ struct server_geometry {
 
 class craft_tcp_server {
 public:
-    explicit craft_tcp_server(server_geometry geo, std::string const& server_config_file = {});
+    explicit craft_tcp_server(server_geometry geo, std::string const& server_config_file = {},
+                              std::shared_ptr< registry_manager > registry_mgr = nullptr,
+                              bool init_raft_service = false);
     ~craft_tcp_server();
     craft_tcp_server(craft_tcp_server&&) = default;
     craft_tcp_server& operator=(craft_tcp_server&&) = default;
@@ -70,6 +73,8 @@ private:
     uint64_t next_term_ = 0;                     // monotonic term source; a fresh LOGIN takes ++next_term_
     uint64_t session_term_ = 0;                  // the current session's term, stamped on every IO
     bool session_active_ = false;                // false before LOGIN / after LOGOUT -> IO is fenced
+    std::shared_ptr< registry_manager > registry_mgr_ = nullptr; // the registry manager instance
+    bool raft_enabled_ = false;
 
     void on_login(craft_conn&, wire::message const&);
     void on_helo(craft_conn&, wire::message const&);

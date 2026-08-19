@@ -26,7 +26,7 @@
 #include <sisl/logging/logging.h> // server-side r/w trace (base module; visible with -v trace / when a consumer inits logging)
 
 #include "raft/raft_replica.hpp" // the full RaftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
-#include "raft/raft_service.hpp"
+#include "registry_mgr.hpp"
 #include <craft/status.hpp> // to_wire_status (the shared wire <-> craft_error bridge)
 #include "helper.hpp"
 
@@ -39,10 +39,15 @@ std::span< uint8_t const > as_bytes(T const& v) {
 }
 } // namespace
 
-craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& server_config_file) : geo_{std::move(geo)} {
+craft_tcp_server::craft_tcp_server(server_geometry geo, std::string const& server_config_file,
+                                   std::shared_ptr< registry_manager > registry_mgr, bool init_raft_service) :
+        geo_{std::move(geo)},
+        registry_mgr_{std::move(registry_mgr)},
+        raft_enabled_{init_raft_service} {
     auto ep = replica_endpoint{.id = to_uuid(geo_.member.id), .addr = geo_.member.addr};
     LOGINFO("craft_tcp_server: starting [id={}] config_file='{}'", boost::uuids::to_string(ep.id), server_config_file);
-    replica_ = std::make_shared< RaftReplica >(std::move(ep), geo_.lba_size, geo_.max_tx, server_config_file);
+    replica_ = std::make_shared< RaftReplica >(std::move(ep), geo_.lba_size, geo_.max_tx, server_config_file,
+                                               registry_mgr_, init_raft_service);
 }
 
 craft_tcp_server::~craft_tcp_server() = default;
@@ -167,7 +172,7 @@ void craft_tcp_server::on_helo(craft_conn& conn, wire::message const& req) {
     auto const hr = wire::decode< wire::helo_req >(req.op_header);
     wire::status code = wire::status::ok;
 
-    if (!raft_service::instance()->is_raft_enabled()) {
+    if (!raft_enabled_) {
         // no raft, follow fake cold path
         auto result = replica_->srv_establish(hr.volume_id, hr.client_token, session_term_);
         if (!result) {

@@ -19,6 +19,7 @@ using raft_peer_t = std::pair< std::string, uint16_t >; // <host, raft_port>
 namespace craft {
 
 class raft_state_mgr;
+class registry_manager;
 
 // Process-wide bridge for the peer-to-peer consensus engine used by the TCP server and replica-side code.
 // The concrete nuraft_mesg::manager instance is installed once and then shared by anyone that needs to create
@@ -29,12 +30,8 @@ public:
     inline static const std::string peer_id_key(boost::uuids::uuid const& peer_id) {
         return fmt::format("raft_peer_{}", boost::uuids::to_string(peer_id));
     }
-
+    raft_service(boost::uuids::uuid const& server_uuid, std::shared_ptr< registry_manager > registry_mgr);
     virtual ~raft_service();
-    static std::shared_ptr< raft_service > instance();
-    bool is_raft_enabled() { return consensus_ != nullptr; }
-    consensus_handle get_consensus();
-    void start_raft_service(boost::uuids::uuid const& server_uuid);
     result< void > srv_create_partition(boost::uuids::uuid const& group_id,
                                         std::vector< replica_endpoint > const& members);
     void add_commit_cb(raft_commit_cb_t cb);
@@ -59,6 +56,7 @@ private:
     std::shared_mutex mu_;
     std::map< nuraft_mesg::group_id_t, std::shared_ptr< raft_state_mgr > > state_mgrs_;
     raft_commit_cb_t commit_cb_;
+    std::shared_ptr< registry_manager > registry_mgr_;
 
     result< std::shared_ptr< raft_state_mgr > > get_state_mgr(nuraft_mesg::group_id_t const& group_id);
     void add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::shared_ptr< raft_state_mgr > mgr);
