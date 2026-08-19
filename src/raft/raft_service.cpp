@@ -9,6 +9,10 @@
 #include <boost/uuid/string_generator.hpp>
 #include <utility>
 
+namespace {
+std::string const state_mgr_key_prefix{"raft_state_mgr"};
+}
+
 namespace craft {
 
 namespace {
@@ -97,28 +101,16 @@ std::string raft_service::lookup_peer(nuraft_mesg::peer_id_t const& peer_id) {
 
 std::shared_ptr< nuraft_mesg::mesg_state_mgr > raft_service::create_state_mgr(int32_t const srv_id,
                                                                               nuraft_mesg::group_id_t const& group_id) {
-    auto result = get_state_mgr(group_id);
+    auto result = registry_mgr_->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
     if (result) {
         LOGINFO("RAFT state manager for group_id={} already exists, returning existing instance",
                 boost::uuids::to_string(group_id));
-        return result.value();
+        return result;
     }
     LOGINFO("Creating RAFT state manager for server_id={} group_id={}", srv_id, boost::uuids::to_string(group_id));
-    auto mgr = std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id, commit_cb_);
-    add_state_mgr(group_id, mgr);
+    auto mgr = std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id, commit_cb_, registry_mgr_);
+    registry_mgr_->put< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id), mgr);
     return mgr;
-}
-
-result< std::shared_ptr< raft_state_mgr > > raft_service::get_state_mgr(nuraft_mesg::group_id_t const& group_id) {
-    std::shared_lock< std::shared_mutex > g{mu_};
-    auto const it = state_mgrs_.find(group_id);
-    if (it == state_mgrs_.end()) return fail(craft_error::INTERNAL);
-    return it->second;
-}
-
-void raft_service::add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::shared_ptr< raft_state_mgr > mgr) {
-    std::lock_guard< std::shared_mutex > g{mu_};
-    state_mgrs_[group_id] = std::move(mgr);
 }
 
 void raft_service::add_commit_cb(raft_commit_cb_t cb) {
@@ -135,12 +127,12 @@ bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
         LOGERROR("Raft not enabled!");
         return false;
     }
-    auto const state_mgr = get_state_mgr(group_id);
+    auto const state_mgr = registry_mgr_->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
     if (!state_mgr) {
         LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
         return false;
     }
-    auto* raft_ctx = state_mgr.value()->repl_ctx();
+    auto* raft_ctx = state_mgr->repl_ctx();
     return raft_ctx && raft_ctx->is_raft_leader();
 }
 
@@ -149,12 +141,12 @@ nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& gr
         LOGERROR("Raft not enabled!");
         return {};
     }
-    auto const state_mgr = get_state_mgr(group_id);
+    auto const state_mgr = registry_mgr_->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
     if (!state_mgr) {
         LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
         return {};
     }
-    auto* raft_ctx = state_mgr.value()->repl_ctx();
+    auto* raft_ctx = state_mgr->repl_ctx();
     if (!raft_ctx) {
         LOGWARN("No leader for the raft group {}", group_id);
         return {};
@@ -168,12 +160,12 @@ nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& gr
 
 template < typename MsgT >
 result< void > raft_service::propose(boost::uuids::uuid const& group_id, MsgT const& payload) {
-    auto const state_mgr = get_state_mgr(group_id);
+    auto const state_mgr = registry_mgr_->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
     if (!state_mgr) {
         LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
         return std::unexpected(make_error_condition(craft_error::INTERNAL));
     }
-    auto* raft_ctx = state_mgr.value()->repl_ctx();
+    auto* raft_ctx = state_mgr->repl_ctx();
     if (!raft_ctx) {
         LOGWARN("RAFT state manager context for group_id={} not found", boost::uuids::to_string(group_id));
         return std::unexpected(make_error_condition(craft_error::INTERNAL));

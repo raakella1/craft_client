@@ -54,12 +54,8 @@ private:
     std::once_flag raft_started_;
     nlohmann::json server_config_;
     std::shared_mutex mu_;
-    std::map< nuraft_mesg::group_id_t, std::shared_ptr< raft_state_mgr > > state_mgrs_;
     raft_commit_cb_t commit_cb_;
     std::shared_ptr< registry_manager > registry_mgr_;
-
-    result< std::shared_ptr< raft_state_mgr > > get_state_mgr(nuraft_mesg::group_id_t const& group_id);
-    void add_state_mgr(nuraft_mesg::group_id_t const& group_id, std::shared_ptr< raft_state_mgr > mgr);
 };
 
 } // namespace craft

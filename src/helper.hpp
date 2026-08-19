@@ -47,4 +47,8 @@ inline std::error_condition jsonObjectFromFile(std::string const& filename, json
     return std::error_condition();
 }
 
+inline std::string registry_key(std::string const& prefix, boost::uuids::uuid const& id) {
+    return fmt::format("{}_{}", prefix, boost::uuids::to_string(id));
+}
+
 } // namespace craft
