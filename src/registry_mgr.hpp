@@ -4,6 +4,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <any>
+#include <sisl/logging/logging.h>
 
 namespace craft {
 
@@ -29,5 +30,11 @@ private:
     mutable std::mutex component_mutex_;
     std::unordered_map<std::string, std::any> component_store_;
 };
+
+inline std::shared_ptr< registry_manager > lock_registry(std::weak_ptr< registry_manager > const& w) {
+    auto r = w.lock();
+    RELEASE_ASSERT(r, "registry destroyed before component");
+    return r;
+}
 
 }

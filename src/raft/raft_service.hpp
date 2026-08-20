@@ -30,7 +30,7 @@ public:
     inline static const std::string peer_id_key(boost::uuids::uuid const& peer_id) {
         return fmt::format("raft_peer_{}", boost::uuids::to_string(peer_id));
     }
-    raft_service(boost::uuids::uuid const& server_uuid, std::shared_ptr< registry_manager > registry_mgr);
+    raft_service(boost::uuids::uuid const& server_uuid, std::weak_ptr< registry_manager > registry_mgr);
     virtual ~raft_service();
     result< void > srv_create_partition(boost::uuids::uuid const& group_id,
                                         std::vector< replica_endpoint > const& members);
@@ -55,7 +55,7 @@ private:
     nlohmann::json server_config_;
     std::shared_mutex mu_;
     raft_commit_cb_t commit_cb_;
-    std::shared_ptr< registry_manager > registry_mgr_;
+    std::weak_ptr< registry_manager > registry_mgr_;
 };
 
 } // namespace craft

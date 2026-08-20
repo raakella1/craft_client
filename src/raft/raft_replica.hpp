@@ -43,7 +43,7 @@ struct InternalLoginMsg;
 class RaftReplica final : public MemCraftReplica {
 public:
     RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx, std::string const& replica_config_path,
-                std::shared_ptr< registry_manager > registry_mgr, bool init_raft_service = false);
+                std::weak_ptr< registry_manager > registry_mgr, bool init_raft_service = false);
 
     ~RaftReplica();
 
@@ -83,7 +83,7 @@ private:
     
     class RaftCommitWorker;
     std::unique_ptr< RaftCommitWorker > commit_worker_;
-    std::shared_ptr< registry_manager > registry_mgr_;
+    std::weak_ptr< registry_manager > registry_mgr_;
     std::shared_ptr< raft_service > raft_service_;
 };
 

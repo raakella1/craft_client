@@ -27,12 +27,12 @@ static nuraft::ptr< nuraft::buffer > create_message(nlohmann::json const& j_obj)
     return buf;
 }
 
-raft_service::raft_service(boost::uuids::uuid const& server_uuid, std::shared_ptr< registry_manager > registry_mgr) :
+raft_service::raft_service(boost::uuids::uuid const& server_uuid, std::weak_ptr< registry_manager > registry_mgr) :
         server_uuid_(server_uuid),
         registry_mgr_(std::move(registry_mgr)) {
     nuraft::nuraft_global_mgr::init(); // raft global manager for commits
     std::call_once(raft_started_, [&] {
-        auto my_info = registry_mgr_->get< raft_peer_t >(peer_id_key(server_uuid_));
+        auto my_info = lock_registry(registry_mgr_)->get< raft_peer_t >(peer_id_key(server_uuid_));
         if (!my_info) {
             LOGERROR("Could not start raft service, unrecognized replica uuid {}", server_uuid);
             return;
@@ -92,7 +92,7 @@ result< void > raft_service::srv_create_partition(boost::uuids::uuid const& grou
 }
 
 std::string raft_service::lookup_peer(nuraft_mesg::peer_id_t const& peer_id) {
-    if (auto peer_addr = registry_mgr_->get< raft_peer_t >(peer_id_key(peer_id)); peer_addr) {
+    if (auto peer_addr = lock_registry(registry_mgr_)->get< raft_peer_t >(peer_id_key(peer_id)); peer_addr) {
         return fmt::format("{}:{}", peer_addr->first, peer_addr->second);
     }
     LOGWARN("Peer {} not found in lookup map", boost::uuids::to_string(peer_id));
@@ -101,7 +101,8 @@ std::string raft_service::lookup_peer(nuraft_mesg::peer_id_t const& peer_id) {
 
 std::shared_ptr< nuraft_mesg::mesg_state_mgr > raft_service::create_state_mgr(int32_t const srv_id,
                                                                               nuraft_mesg::group_id_t const& group_id) {
-    auto result = registry_mgr_->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
+    auto reg = lock_registry(registry_mgr_);
+    auto result = reg->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
     if (result) {
         LOGINFO("RAFT state manager for group_id={} already exists, returning existing instance",
                 boost::uuids::to_string(group_id));
@@ -109,7 +110,7 @@ std::shared_ptr< nuraft_mesg::mesg_state_mgr > raft_service::create_state_mgr(in
     }
     LOGINFO("Creating RAFT state manager for server_id={} group_id={}", srv_id, boost::uuids::to_string(group_id));
     auto mgr = std::make_shared< raft_state_mgr >(srv_id, server_uuid_, group_id, commit_cb_, registry_mgr_);
-    registry_mgr_->put< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id), mgr);
+    reg->put< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id), mgr);
     return mgr;
 }
 
@@ -127,7 +128,7 @@ bool raft_service::is_leader(nuraft_mesg::group_id_t const& group_id) {
         LOGERROR("Raft not enabled!");
         return false;
     }
-    auto const state_mgr = registry_mgr_->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
+    auto const state_mgr = lock_registry(registry_mgr_)->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
     if (!state_mgr) {
         LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
         return false;
@@ -141,7 +142,7 @@ nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& gr
         LOGERROR("Raft not enabled!");
         return {};
     }
-    auto const state_mgr = registry_mgr_->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
+    auto const state_mgr = lock_registry(registry_mgr_)->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
     if (!state_mgr) {
         LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
         return {};
@@ -160,7 +161,7 @@ nuraft_mesg::peer_id_t raft_service::leader_id(nuraft_mesg::group_id_t const& gr
 
 template < typename MsgT >
 result< void > raft_service::propose(boost::uuids::uuid const& group_id, MsgT const& payload) {
-    auto const state_mgr = registry_mgr_->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
+    auto const state_mgr = lock_registry(registry_mgr_)->get< raft_state_mgr >(registry_key(state_mgr_key_prefix, group_id));
     if (!state_mgr) {
         LOGWARN("RAFT state manager for group_id={} not found", boost::uuids::to_string(group_id));
         return std::unexpected(make_error_condition(craft_error::INTERNAL));

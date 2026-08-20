@@ -61,7 +61,7 @@ using raft_commit_cb_t = std::function< void(uint64_t log_idx, nlohmann::json co
 class echo_state_machine : public nuraft::state_machine {
 public:
     echo_state_machine(raft_commit_cb_t const& cb, std::string const& group_id,
-                       std::shared_ptr< registry_manager > registry_mgr) :
+                       std::weak_ptr< registry_manager > registry_mgr) :
             commit_cb_{cb},
             group_id_{group_id},
             last_commit_idx_(0),
@@ -108,6 +108,6 @@ private:
     raft_commit_cb_t commit_cb_;
     std::string group_id_;
     nuraft::ulong last_commit_idx_;
-    std::shared_ptr< registry_manager > registry_mgr_;
+    std::weak_ptr< registry_manager > registry_mgr_;
 };
 } // namespace craft

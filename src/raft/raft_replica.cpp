@@ -121,12 +121,13 @@ void RaftReplica::replica_init(std::string const& replica_config_path) {
         LOGWARN("No replica config path provided, skipping replica initialization");
         return;
     }
-    if (!registry_mgr_) {
+    auto reg = registry_mgr_.lock();
+    if (!reg) {
         LOGWARN("Registry manager is not initialized, cannot initialize replica");
         return;
     }
 
-    if (auto const rinfo = registry_mgr_->get< replica_info >(registry_key(replica_info_key_prefix, ep_.id)); rinfo) {
+    if (auto const rinfo = reg->get< replica_info >(registry_key(replica_info_key_prefix, ep_.id)); rinfo) {
         // recovery from registry
         return;
     }
@@ -157,9 +158,9 @@ void RaftReplica::replica_init(std::string const& replica_config_path) {
                 : std::make_shared< net::CraftTcpPeer >(m.at("host").get< std::string >(),
                                                         m.at("tcp_port").get< uint16_t >(), id),
         });
-        registry_mgr_->put< raft_peer_t >(raft_service::peer_id_key(id),
-                                          std::make_shared< raft_peer_t >(std::make_pair(r->host, r->raft_port)));
-        registry_mgr_->put< replica_info >(registry_key(replica_info_key_prefix, r->id), std::move(r));
+        reg->put< raft_peer_t >(raft_service::peer_id_key(id),
+                                std::make_shared< raft_peer_t >(std::make_pair(r->host, r->raft_port)));
+        reg->put< replica_info >(registry_key(replica_info_key_prefix, r->id), std::move(r));
     }
 }
 
@@ -211,20 +212,21 @@ void RaftReplica::raft_init() {
 }
 
 void RaftReplica::journal_init() {
-    if (!registry_mgr_) {
+    auto reg = registry_mgr_.lock();
+    if (!reg) {
         LOGWARN("Registry manager is not initialized, cannot initialize journal and index");
         return;
     }
-    if (auto existing = registry_mgr_->get< journal_t >(registry_key(journal_key_prefix, ep_.id)); !existing) {
+    if (auto existing = reg->get< journal_t >(registry_key(journal_key_prefix, ep_.id)); !existing) {
         LOGINFO("No journal found in registry for replica {}", boost::uuids::to_string(ep_.id));
-        registry_mgr_->put< journal_t >(registry_key(journal_key_prefix, ep_.id), journal_);
+        reg->put< journal_t >(registry_key(journal_key_prefix, ep_.id), journal_);
     } else {
         LOGINFO("Journal found in registry for replica {}, loading into memory", boost::uuids::to_string(ep_.id));
         journal_ = existing;
     }
-    if (auto existing = registry_mgr_->get< index_t >(registry_key(index_key_prefix, ep_.id)); !existing) {
+    if (auto existing = reg->get< index_t >(registry_key(index_key_prefix, ep_.id)); !existing) {
         LOGINFO("No index found in registry for replica {}", boost::uuids::to_string(ep_.id));
-        registry_mgr_->put< index_t >(registry_key(index_key_prefix, ep_.id), index_);
+        reg->put< index_t >(registry_key(index_key_prefix, ep_.id), index_);
     } else {
         LOGINFO("Index found in registry for replica {}, loading into memory", boost::uuids::to_string(ep_.id));
         index_ = existing;
@@ -232,7 +234,7 @@ void RaftReplica::journal_init() {
 }
 
 RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx,
-                         std::string const& replica_config_path, std::shared_ptr< registry_manager > registry_mgr,
+                         std::string const& replica_config_path, std::weak_ptr< registry_manager > registry_mgr,
                          bool init_raft_service) :
         MemCraftReplica{std::move(ep), page_size, nullptr},
         max_tx_{max_tx},
@@ -295,7 +297,7 @@ std::vector< int64_t > RaftReplica::get_missing_slots(int64_t watermark) {
 std::pair< std::vector< int64_t >, int64_t > RaftReplica::resolve_and_apply(boost::uuids::uuid const& partition_uuid,
                                                                             int64_t watermark, uint64_t client_token,
                                                                             uint64_t term) {
-    auto const peers = peer_list(partition_uuid, registry_mgr_);
+    auto const peers = peer_list(partition_uuid, lock_registry(registry_mgr_));
     if (peers.empty()) {
         LOGERROR("resolve_and_apply[partition={}]: no peers found in registry",
                  boost::uuids::to_string(partition_uuid));
@@ -421,7 +423,7 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
         peer_resp.emplace_back(lsn_pair{state_.commit_lsn, state_.last_append_lsn});
     }
 
-    auto const members = peer_list(partition_uuid, registry_mgr_);
+    auto const members = peer_list(partition_uuid, lock_registry(registry_mgr_));
     LOGDEBUG("apply_login[partition={}]: polling {} member(s) for GetRSCommitLSN",
              boost::uuids::to_string(partition_uuid), members.size());
     for (auto const& m : members) {
@@ -498,7 +500,8 @@ result< void > RaftReplica::srv_create_partition(std::array< uint8_t, 16 > const
                                                  std::vector< replica_endpoint > const& members) {
     auto const partition_uuid = craft::to_uuid(partition_id);
     // return success if the partition exists
-    if (auto p = registry_mgr_->get< partition_peers_list_t >(registry_key(partition_info_key_prefix, partition_uuid));
+    auto reg = lock_registry(registry_mgr_);
+    if (auto p = reg->get< partition_peers_list_t >(registry_key(partition_info_key_prefix, partition_uuid));
         p && !p->empty()) {
         LOGINFO("Partition {} exists! Returning ok", boost::uuids::to_string(partition_uuid));
         return {};
@@ -515,8 +518,8 @@ result< void > RaftReplica::srv_create_partition(std::array< uint8_t, 16 > const
     if (r) {
         auto view = members | std::views::transform(&replica_endpoint::id);
         std::vector< boost::uuids::uuid > peer_uuids(view.begin(), view.end());
-        registry_mgr_->put< partition_peers_list_t >(registry_key(partition_info_key_prefix, partition_uuid),
-                                                     std::make_shared< partition_peers_list_t >(std::move(peer_uuids)));
+        reg->put< partition_peers_list_t >(registry_key(partition_info_key_prefix, partition_uuid),
+                                           std::make_shared< partition_peers_list_t >(std::move(peer_uuids)));
         LOGINFO("srv_create_partition[partition={}]: SUCCESS", boost::uuids::to_string(partition_uuid));
     } else {
         LOGERROR("srv_create_partition[partition={}]: FAILED: {}", boost::uuids::to_string(partition_uuid),
@@ -539,7 +542,7 @@ void RaftReplica::apply_sync(boost::uuids::uuid const& partition_uuid, SyncRSCom
     }
 
     auto missing = get_missing_slots(m.rs_commit_lsn);
-    auto const peers = peer_list(partition_uuid, registry_mgr_);
+    auto const peers = peer_list(partition_uuid, lock_registry(registry_mgr_));
     if (peers.empty()) {
         LOGERROR("apply_sync[partition={}]: no peers found in registry", boost::uuids::to_string(partition_uuid));
     }
