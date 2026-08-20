@@ -28,7 +28,6 @@
 #include <boost/uuid/string_generator.hpp>
 #include <queue>
 
-
 #include <sisl/logging/logging.h>
 
 namespace craft {
@@ -84,8 +83,8 @@ private:
     }
 };
 
-RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx) : MemCraftReplica{std::move(ep), page_size, nullptr},
-                                                max_tx_{max_tx} {
+RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx) :
+        MemCraftReplica{std::move(ep), page_size, nullptr}, max_tx_{max_tx} {
     // register raft callbacks
     // do not block commit thread, offload the business logic to the commit_worker
     auto raft_inst = raft_service::instance();
@@ -134,8 +133,7 @@ RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_t
 
     // start background commit offload worker
     commit_worker_ = std::make_unique< RaftReplica::RaftCommitWorker >();
-    LOGDEBUG("RaftReplica constructed [id={}] lba_size={}", boost::uuids::to_string(ep_.id),
-             page_size_);
+    LOGDEBUG("RaftReplica constructed [id={}] lba_size={}", boost::uuids::to_string(ep_.id), page_size_);
 }
 
 RaftReplica::~RaftReplica() = default;
@@ -187,8 +185,8 @@ std::vector< int64_t > RaftReplica::get_missing_slots(int64_t watermark) {
 }
 
 std::pair< std::vector< int64_t >, int64_t > RaftReplica::resolve_and_apply(boost::uuids::uuid const& vol_uuid,
-                                                                                int64_t watermark,
-                                                                                uint64_t client_token, uint64_t term) {
+                                                                            int64_t watermark, uint64_t client_token,
+                                                                            uint64_t term) {
     auto const peers = replica_manager::instance()->get_volume(vol_uuid);
     auto const missing_lsns = get_missing_slots(watermark);
     LOGDEBUG("resolve_and_apply[vol={}] watermark={} missing={} peers={}", boost::uuids::to_string(vol_uuid), watermark,
@@ -249,7 +247,7 @@ std::pair< std::vector< int64_t >, int64_t > RaftReplica::resolve_and_apply(boos
 }
 
 result< void > RaftReplica::sync_rs_commit_lsn(boost::uuids::uuid const& vol_uuid, int64_t rs_commit_lsn,
-                                                   uint64_t client_token, uint64_t term) {
+                                               uint64_t client_token, uint64_t term) {
     auto const [empty_slots, stalled_lsn] = resolve_and_apply(vol_uuid, rs_commit_lsn, client_token, term);
     if (stalled_lsn != -1) {
         // leader could not resolve all the missing lsns
@@ -273,7 +271,7 @@ result< void > RaftReplica::sync_rs_commit_lsn(boost::uuids::uuid const& vol_uui
 }
 
 result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& volume_id, uint64_t client_token,
-                                                   uint64_t term) {
+                                               uint64_t term) {
     auto raft_service_inst = raft_service::instance();
     // A note on dlsn: The login WATERMARK: the last dLSN already durable (-1 on a fresh replica), NOT the next one
     // to use -- the client derives next_dlsn_ = dlsn + 1 itself. This used to send last_append_lsn + 1,
@@ -288,8 +286,7 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
         state_.client_token = client_token;
         LOGINFO("apply_login [id={}]: raft disabled, cold-path login OK, term={} token={}",
                 boost::uuids::to_string(ep_.id), term, client_token);
-        return LoginResult{.members = {ep_},
-                           .dLSN = state_.last_append_lsn};
+        return LoginResult{.members = {ep_}, .dLSN = state_.last_append_lsn};
     }
     // Phase 1: collect replica LSN state (non-RAFT broadcast)
     // 1.1: accepted by leader only.
@@ -378,13 +375,12 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
     }
     LOGINFO("apply_login[vol={}]: LOGIN SUCCESS term={} dLSN={} members={}", boost::uuids::to_string(vol_uuid), term,
             rs_commit_lsn, replicas.size());
-    return LoginResult{.members = replicas,
-                       .dLSN = rs_commit_lsn};
+    return LoginResult{.members = replicas, .dLSN = rs_commit_lsn};
 }
 
 // create peer raft group and add members to it.
 result< void > RaftReplica::srv_create_volume(std::array< uint8_t, 16 > const& volume_id,
-                                                  std::vector< replica_endpoint > const& members) {
+                                              std::vector< replica_endpoint > const& members) {
     auto const vol_uuid = craft::to_uuid(volume_id);
     auto const& repl_mgr = replica_manager::instance();
     // return success if the volume exists

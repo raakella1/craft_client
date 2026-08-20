@@ -92,7 +92,7 @@ async_result< lsn_pair > MemTransport::send_write(std::shared_ptr< MemCraftRepli
     // submit. It resumes on one of THIS replica's server threads. Hold the awaitable in a local across the
     // suspension -- it is non-movable and that thread needs its address to stay put.
     auto ev = after(p.wait, id);
-    co_await* ev;
+    co_await *ev;
 
     if (p.timed_out) co_return std::unexpected(std::make_error_condition(std::errc::timed_out));
     // Re-read: the peer may have gone down while this request was on the wire.
@@ -112,7 +112,7 @@ async_result< read_result > MemTransport::send_read(std::shared_ptr< MemCraftRep
     auto const p = plan_delivery(rf->delay, op_timeout());
     {
         auto ev = after(p.wait, id); // always suspends: the reply crosses the wire
-        co_await* ev;
+        co_await *ev;
     }
     if (p.timed_out) co_return std::unexpected(std::make_error_condition(std::errc::timed_out));
     if (!to->fault_snapshot()->up) co_return fail(craft_error::REPLICA_DOWN);
@@ -127,7 +127,7 @@ async_result< lsn_pair > MemTransport::send_keep_alive(std::shared_ptr< MemCraft
     auto const p = plan_delivery(rf->delay, op_timeout());
     {
         auto ev = after(p.wait, id); // always suspends: the reply crosses the wire
-        co_await* ev;
+        co_await *ev;
     }
     if (p.timed_out) co_return std::unexpected(std::make_error_condition(std::errc::timed_out));
     if (!to->fault_snapshot()->up) co_return fail(craft_error::REPLICA_DOWN);

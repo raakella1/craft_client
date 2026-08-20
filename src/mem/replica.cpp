@@ -201,8 +201,7 @@ async_status MemCraftReplica::late_write(::io_uring* q, client_hdr hdr, int64_t 
     if (lf->up && lf->write_ok) (void)do_write(hdr, dlsn, addr, len, std::move(bytes)); // dropped iff down in flight
     co_return ok();
 }
-async_result< resolution_result > MemCraftReplica::request_resolution(::io_uring* /*q*/, client_hdr hdr,
-                                                                      int64_t upto) {
+async_result< resolution_result > MemCraftReplica::request_resolution(::io_uring* /*q*/, client_hdr hdr, int64_t upto) {
     if (!net_) co_return fail(craft_error::NO_QUORUM); // srv-seam replicas resolve via srv_resolve instead
     if (!is_up()) co_return fail(craft_error::REPLICA_DOWN);
     // Term-fenced like logout: a deposed client must not be able to void the successor's in-flight slots.

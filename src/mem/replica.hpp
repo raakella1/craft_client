@@ -35,7 +35,7 @@
 #include <string>
 #include <vector>
 
-#include <craft/client.hpp> // result types
+#include <craft/client.hpp>  // result types
 #include "craft_peer.hpp"    // the PEER plane: craft_peer + JournalSlot + lba_t (this model is its only implementer)
 #include "craft_replica.hpp" // the CLIENT plane: the craft_replica interface
 
@@ -261,20 +261,19 @@ private:
     lsn_pair peek_lsns();
     void cold_apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
     void cold_apply_logout();
-    
 
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.
     std::optional< MemJournalSlot > peek_slot(int64_t dlsn); // copy of the slot, or nullopt if absent
-    
-    void cold_mark_empty(int64_t dlsn);                      // Empty verdict tombstone; overwrites held
-                                                             // data (reconciliation: Empty beats data)
-    std::vector< int64_t > peek_empties(int64_t upto);       // every is_empty dLSN <= upto
+
+    void cold_mark_empty(int64_t dlsn);                // Empty verdict tombstone; overwrites held
+                                                       // data (reconciliation: Empty beats data)
+    std::vector< int64_t > peek_empties(int64_t upto); // every is_empty dLSN <= upto
 
 protected:
     void cold_apply_login(uint64_t client_token, uint64_t term);
     void cold_truncate_above(int64_t rs_commit_lsn);
-    void cold_install_slot(int64_t dlsn, MemJournalSlot s);  // fill a hole; never overwrites an entry
+    void cold_install_slot(int64_t dlsn, MemJournalSlot s); // fill a hole; never overwrites an entry
 
     // Test observability: how many reads this replica actually served. Lets a test witness read routing
     // (e.g. round-robin distribution across members). Not part of the CRAFT surface.

@@ -66,10 +66,10 @@ public:
 
 private:
     server_geometry geo_;
-    std::shared_ptr< RaftReplica > replica_;     // the real state; driven via its srv_* local-server seam
-    uint64_t next_term_ = 0;                     // monotonic term source; a fresh LOGIN takes ++next_term_
-    uint64_t session_term_ = 0;                  // the current session's term, stamped on every IO
-    bool session_active_ = false;                // false before LOGIN / after LOGOUT -> IO is fenced
+    std::shared_ptr< RaftReplica > replica_; // the real state; driven via its srv_* local-server seam
+    uint64_t next_term_ = 0;                 // monotonic term source; a fresh LOGIN takes ++next_term_
+    uint64_t session_term_ = 0;              // the current session's term, stamped on every IO
+    bool session_active_ = false;            // false before LOGIN / after LOGOUT -> IO is fenced
 
     void on_login(craft_conn&, wire::message const&);
     void on_helo(craft_conn&, wire::message const&);

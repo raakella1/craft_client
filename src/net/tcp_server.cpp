@@ -25,7 +25,7 @@
 #include <sisl/logging/logging.h> // server-side r/w trace (base module; visible with -v trace / when a consumer inits logging)
 
 #include "raft/raft_replica.hpp" // the full RaftReplica (+ sisl::sg_list via sisl/fds/buffer.hpp)
-#include <craft/status.hpp> // to_wire_status (the shared wire <-> craft_error bridge)
+#include <craft/status.hpp>      // to_wire_status (the shared wire <-> craft_error bridge)
 #include "raft/raft_service.hpp"
 #include "replica_mgr.hpp"
 #include "helper.hpp"

@@ -39,7 +39,6 @@ struct InternalLoginMsg;
 
 class RaftReplica final : public MemCraftReplica {
 public:
-
     RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx);
 
     ~RaftReplica();
@@ -74,7 +73,7 @@ private:
     std::mutex login_mu_;
     std::condition_variable login_cv_;
     bool login_done_{false};
-    
+
     class RaftCommitWorker;
     std::unique_ptr< RaftCommitWorker > commit_worker_;
 };

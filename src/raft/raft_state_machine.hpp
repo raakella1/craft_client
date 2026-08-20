@@ -60,9 +60,7 @@ using raft_commit_cb_t = std::function< void(uint64_t log_idx, nlohmann::json co
 class echo_state_machine : public nuraft::state_machine {
 public:
     echo_state_machine(raft_commit_cb_t const& cb, std::string const& group_id) :
-            commit_cb_{cb},
-            group_id_{group_id},
-            last_commit_idx_(0) {}
+            commit_cb_{cb}, group_id_{group_id}, last_commit_idx_(0) {}
 
     virtual nuraft::ptr< nuraft::buffer > commit(nuraft::ulong log_idx, nuraft::buffer& data) override {
         nlohmann::json j;

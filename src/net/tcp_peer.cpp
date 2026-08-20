@@ -28,10 +28,7 @@ std::error_condition net_to_error(net_error e) {
 } // namespace
 
 CraftTcpPeer::CraftTcpPeer(std::string host, uint16_t port, peer_id_t id, std::chrono::milliseconds op_timeout) :
-        host_{std::move(host)},
-        port_{port},
-        id_{id},
-        op_timeout_{op_timeout} {}
+        host_{std::move(host)}, port_{port}, id_{id}, op_timeout_{op_timeout} {}
 
 CraftTcpPeer::~CraftTcpPeer() = default;
 

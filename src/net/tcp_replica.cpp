@@ -234,7 +234,7 @@ std::optional< std::error_condition > CraftTcpReplica::ensure_bound(uint64_t ter
 
 async_result< LoginResult > CraftTcpReplica::login(uint64_t client_token) {
     auto ev = hop();
-    co_await* ev; // now on the session-mgr thread
+    co_await *ev; // now on the session-mgr thread
     if (!ensure_connected()) co_return fail(craft_error::REPLICA_DOWN);
     auto r = conn_.login(vol_id_, client_token); // LOGIN names the volume, exactly as HELO does
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
@@ -266,7 +266,7 @@ async_result< LoginResult > CraftTcpReplica::login(uint64_t client_token) {
 
 async_status CraftTcpReplica::logout(client_hdr hdr) {
     auto ev = hop();
-    co_await* ev;
+    co_await *ev;
     if (!ensure_connected()) co_return fail(craft_error::REPLICA_DOWN);
     (void)hdr;
     auto r = conn_.logout();
@@ -302,7 +302,7 @@ async_result< lsn_pair > CraftTcpReplica::write(::io_uring* q, client_hdr hdr, i
     }
 
     auto ev = hop();
-    co_await* ev;
+    co_await *ev;
     if (auto e = ensure_bound(hdr.term, hdr.client_token)) co_return std::unexpected(*e);
     auto r = conn_.write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
@@ -335,7 +335,7 @@ async_result< read_result > CraftTcpReplica::read(::io_uring* q, client_hdr hdr,
         reply = std::move(*r);
     } else {
         auto ev = hop();
-        co_await* ev;
+        co_await *ev;
         if (auto e = ensure_bound(hdr.term, hdr.client_token)) co_return std::unexpected(*e);
         auto r = conn_.read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
         if (!r) co_return std::unexpected(on_net_fault(r.error()));
@@ -371,7 +371,7 @@ async_result< lsn_pair > CraftTcpReplica::keep_alive(::io_uring* q, client_hdr h
     }
 
     auto ev = hop();
-    co_await* ev;
+    co_await *ev;
     if (auto e = ensure_bound(hdr.term, hdr.client_token)) co_return std::unexpected(*e);
     auto r = conn_.keep_alive(hdr.commit_lsn, hdr.all_committed_lsn);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
@@ -394,7 +394,7 @@ async_result< resolution_result > CraftTcpReplica::request_resolution(::io_uring
 
     // No-ring tier: the blocking session-mgr path, like login/logout.
     auto ev = hop();
-    co_await* ev;
+    co_await *ev;
     if (auto e = ensure_bound(hdr.term, hdr.client_token)) co_return std::unexpected(*e);
     auto r = conn_.resolve(upto, hdr.commit_lsn, hdr.all_committed_lsn);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
