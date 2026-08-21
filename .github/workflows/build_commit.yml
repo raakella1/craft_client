@@ -39,9 +39,22 @@ jobs:
       tooling: None
     if: ${{ github.event_name != 'pull_request' }}
 
-  CraftClientDeps:
+  NuraftMesgDeps:
     needs: SislDeps
-    if: ${{ always() && (needs.SislDeps.result == 'success' || needs.SislDeps.result == 'skipped') }}
+    uses: eBay/nuraft_mesg/.github/workflows/build_dependencies.yml@dev/v5.x
+    with:
+      branch: dev/v5.x
+      platform: ${{ inputs.platform }}
+      build-type: ${{ inputs.build-type }}
+      malloc-impl: ${{ inputs.malloc-impl }}
+      compiler: ${{ inputs.compiler }}
+      conan-channel: ${{ inputs.conan-channel }}
+      tooling: None
+    if: ${{ github.event_name != 'pull_request' }}
+  
+  CraftClientDeps:
+    needs: NuraftMesgDeps
+    if: ${{ always() && (needs.NuraftMesgDeps.result == 'success' || needs.NuraftMesgDeps.result == 'skipped') }}
     uses: ./.github/workflows/build_dependencies.yml
     with:
       branch: ${{ github.ref }}
