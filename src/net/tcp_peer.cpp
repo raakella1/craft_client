@@ -147,8 +147,4 @@ async_result< std::vector< JournalSlot > > CraftTcpPeer::fetch_data(std::vector<
     co_return out_slots;
 }
 
-// ── existing craft_peer methods: not yet implemented over the wire (no opcodes allocated for these yet) ──
-async_result< lsn_pair > CraftTcpPeer::get_lsns() { co_return fail(craft_error::NOT_IMPLEMENTED); }
-async_status CraftTcpPeer::truncate(int64_t lsn) { co_return fail(craft_error::NOT_IMPLEMENTED); }
-
 } // namespace craft::net

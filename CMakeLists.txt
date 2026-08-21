@@ -89,6 +89,7 @@ target_compile_features(raft_service PUBLIC cxx_std_23)
 
 add_library(raft_tcp_server STATIC
   src/raft/raft_replica.cpp
+  src/watchdog.cpp
   src/net/tcp_server.cpp)
 target_include_directories(raft_tcp_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(raft_tcp_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

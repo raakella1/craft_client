@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "mem/replica.hpp"
+#include "watchdog.hpp"
 
 namespace craft {
 
@@ -39,7 +40,8 @@ struct InternalLoginMsg;
 
 class RaftReplica final : public MemCraftReplica {
 public:
-    RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx);
+    RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx,
+                std::shared_ptr< Watchdog > watchdog = nullptr);
 
     ~RaftReplica();
 
@@ -76,6 +78,7 @@ private:
 
     class RaftCommitWorker;
     std::unique_ptr< RaftCommitWorker > commit_worker_;
+    std::optional< Watchdog::TimerId > pending_login_timer_;
 };
 
 } // namespace craft

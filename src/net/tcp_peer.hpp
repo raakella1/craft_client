@@ -22,10 +22,8 @@ public:
     CraftTcpPeer& operator=(CraftTcpPeer const&) = delete;
 
     // ── craft_peer: existing (unchanged) ──
-    async_result< lsn_pair > get_lsns() override;
     virtual async_result< lsn_pair > get_rs_commit_lsn(uint64_t term, bool is_login) override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
-    async_status truncate(int64_t lsn) override;
 
     // ── NEW, not yet on craft_peer.hpp: Login's Phase 1 poll specifically -- carries the caller's own
     // watermarks + the quiesce flag. Add to craft_peer.hpp as a pure virtual once this compiles standalone,

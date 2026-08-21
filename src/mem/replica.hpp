@@ -43,6 +43,7 @@ namespace craft {
 
 class MemTransport; // in-process network + cold path
 class RaftReplica;  // raft based replica server
+class Watchdog;     // the keepalive and login watchdog
 
 using sisl::ok;
 template < typename T >
@@ -297,6 +298,7 @@ protected:
     std::map< int64_t, MemJournalSlot > journal_; // dLSN -> slot (out-of-order arrival tolerated)
     std::map< lba_t, IndexCell > index_;          // applied prefix (<= commit_lsn); an absent LBA is a hole
     mutable std::mutex mu_;
+    std::shared_ptr< Watchdog > watchdog_; // the keepalive and login watchdog
 };
 
 } // namespace craft
