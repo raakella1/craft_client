@@ -25,7 +25,7 @@
 #include <vector>
 
 #include <sisl/fds/buffer.hpp> // sisl::sg_list
-#include <sisl/result.hpp>           // sisl::result / ::status / ::ok
+#include <sisl/result.hpp>     // sisl::result / ::status / ::ok
 
 #include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases
 

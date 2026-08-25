@@ -168,7 +168,7 @@ public:
     // a friend and drives the cold_* / peek_* helpers below directly. Routing it through this interface is step
     // one of making the peer plane real; step two is allocating its opcodes (wire::op stops at 14).
     async_result< lsn_pair > get_lsns() override;
-    async_result< lsn_pair > get_rs_commit_lsn() override;
+    async_result< lsn_pair > get_rs_commit_lsn(uint64_t term, bool is_login) override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
     async_status truncate(int64_t lsn) override;
 

@@ -24,8 +24,8 @@ namespace {
 
 struct get_rs_commit_lsn_req_wire {
     uint64_t term;
-    uint8_t  is_login;
-    uint8_t  pad[7];
+    uint8_t is_login;
+    uint8_t pad[7];
 };
 
 struct lsn_pair_wire {
@@ -46,13 +46,13 @@ struct fetch_rsp_hdr {
 // One slot descriptor in a fetch_data response body.
 // Layout: [fetch_rsp_hdr][N x slot_desc][data for slot_0][data for slot_1]...
 struct slot_desc {
-    int64_t  lsn;
+    int64_t lsn;
     uint64_t lba;
     uint32_t len;      // lba count
     uint64_t byte_len; // raw payload bytes; 0 for empty / all_zeros slots
-    uint8_t  is_empty;
-    uint8_t  all_zeros;
-    uint8_t  pad[2];
+    uint8_t is_empty;
+    uint8_t all_zeros;
+    uint8_t pad[2];
 };
 
 #pragma pack(pop)
@@ -131,14 +131,16 @@ fetch_data_rsp_encoded encode_fetch_data_rsp(std::vector< JournalSlot > const& s
     for (auto const& s : slots) {
         uint64_t data_size = 0;
         if (!s.is_empty && !s.all_zeros) {
-            for (auto const& iov : s.data.iovs) { data_size += iov.iov_len; }
+            for (auto const& iov : s.data.iovs) {
+                data_size += iov.iov_len;
+            }
         }
         slot_desc d{};
-        d.lsn       = s.lsn;
-        d.lba       = s.lba;
-        d.len       = s.len;
+        d.lsn = s.lsn;
+        d.lba = s.lba;
+        d.len = s.len;
         d.byte_len = data_size;
-        d.is_empty  = s.is_empty  ? 1 : 0;
+        d.is_empty = s.is_empty ? 1 : 0;
         d.all_zeros = s.all_zeros ? 1 : 0;
         std::memcpy(dp++, &d, sizeof(d));
     }
@@ -149,8 +151,7 @@ fetch_data_rsp_encoded encode_fetch_data_rsp(std::vector< JournalSlot > const& s
     for (auto const& s : slots) {
         if (!s.is_empty && !s.all_zeros) {
             for (auto const& iov : s.data.iovs) {
-                blobs.emplace_back(static_cast< uint8_t* >(iov.iov_base),
-                                   static_cast< uint32_t >(iov.iov_len), false);
+                blobs.emplace_back(static_cast< uint8_t* >(iov.iov_base), static_cast< uint32_t >(iov.iov_len), false);
             }
         }
     }
@@ -159,8 +160,8 @@ fetch_data_rsp_encoded encode_fetch_data_rsp(std::vector< JournalSlot > const& s
 }
 
 std::expected< std::vector< JournalSlot >, decode_error > decode_fetch_data_rsp(sisl::io_blob const& blob) {
-    auto const* base  = blob.cbytes();
-    auto const  total = static_cast< std::size_t >(blob.size());
+    auto const* base = blob.cbytes();
+    auto const total = static_cast< std::size_t >(blob.size());
 
     if (total < sizeof(fetch_rsp_hdr)) return std::unexpected(decode_error::truncated);
 
@@ -168,7 +169,7 @@ std::expected< std::vector< JournalSlot >, decode_error > decode_fetch_data_rsp(
     std::memcpy(&rh, base, sizeof(rh));
 
     auto const desc_offset = sizeof(rh);
-    auto const desc_bytes  = static_cast< std::size_t >(rh.slot_count) * sizeof(slot_desc);
+    auto const desc_bytes = static_cast< std::size_t >(rh.slot_count) * sizeof(slot_desc);
     if (total < desc_offset + desc_bytes) return std::unexpected(decode_error::truncated);
 
     std::vector< JournalSlot > slots;
@@ -180,10 +181,10 @@ std::expected< std::vector< JournalSlot >, decode_error > decode_fetch_data_rsp(
         std::memcpy(&d, base + desc_offset + i * sizeof(slot_desc), sizeof(d));
 
         JournalSlot s;
-        s.lsn       = d.lsn;
-        s.lba       = d.lba;
-        s.len       = d.len;
-        s.is_empty  = d.is_empty  != 0;
+        s.lsn = d.lsn;
+        s.lba = d.lba;
+        s.len = d.len;
+        s.is_empty = d.is_empty != 0;
         s.all_zeros = d.all_zeros != 0;
 
         if (d.byte_len > 0) {
@@ -191,7 +192,7 @@ std::expected< std::vector< JournalSlot >, decode_error > decode_fetch_data_rsp(
             // Borrow from blob -- caller must keep the backing buffer alive.
             iovec iov{};
             iov.iov_base = const_cast< uint8_t* >(base + data_offset);
-            iov.iov_len  = d.byte_len;
+            iov.iov_len = d.byte_len;
             s.data.iovs.push_back(iov);
             s.data.size = d.byte_len;
             data_offset += d.byte_len;
