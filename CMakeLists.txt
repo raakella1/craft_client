@@ -34,8 +34,8 @@ add_library(craft_wire STATIC src/wire.cpp)
 target_include_directories(craft_wire PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(craft_wire PUBLIC cxx_std_23)
 
-# ── craft_types: the domain vocabulary ONLY (header-only; result carrier from sisl). This is all a storage
-# backend needs -- the interfaces (craft_replica / craft_peer) are internal, under src/. ──
+# ── craft_types: the domain vocabulary ONLY (header-only; result carrier from sisl). A storage
+# backend also needs craft_client for craft_peer and the peer codec. ──
 add_library(craft_types INTERFACE)
 target_include_directories(craft_types INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(craft_types INTERFACE sisl::sisl)
@@ -45,6 +45,7 @@ target_compile_features(craft_types INTERFACE cxx_std_23)
 add_library(craft_client STATIC
   src/client.cpp
   src/dlsn_tracker.cpp
+  src/peer_codec.cpp
   src/net/conn.cpp
   src/net/wire_client.cpp
   src/net/async_conn.cpp # the P2 on-ring TCP data path (recv-demux pump); internal, behind tcp_replica
