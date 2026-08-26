@@ -17,7 +17,7 @@
 // CRAFT client-facing data types -- the pure-data structs the client API takes and returns. Deliberately
 // engine-free and self-contained (only boost + sisl's ENUM + std): the reference model, the transport, and
 // any consumer (a real HomeStore backend, the ublk driver) share one definition without pulling a storage
-// engine. Internal / peer-only types (CraftPartitionState, JournalSlot) live in craft/replica.hpp.
+// engine. Internal types (CraftPartitionState) live in craft/replica.hpp.
 //
 // peer_id_t is a plain boost uuid here; a consumer that has its own uuid id-type (e.g. homeblocks' node
 // identity) interoperates freely because it is the SAME underlying type.

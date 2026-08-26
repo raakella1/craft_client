@@ -145,9 +145,8 @@ fetch_data_rsp_encoded encode_fetch_data_rsp(std::vector< JournalSlot > const& s
         std::memcpy(dp++, &d, sizeof(d));
     }
 
-    // Blob list: header blob first, then one blob per iov (zero-copy; caller owns lifetime).
+    // Blob list: one blob per iov (zero-copy; caller owns lifetime).
     sisl::io_blob_list_t blobs;
-    blobs.emplace_back(header.data(), static_cast< uint32_t >(header.size()), false);
     for (auto const& s : slots) {
         if (!s.is_empty && !s.all_zeros) {
             for (auto const& iov : s.data.iovs) {
@@ -160,7 +159,7 @@ fetch_data_rsp_encoded encode_fetch_data_rsp(std::vector< JournalSlot > const& s
 }
 
 std::expected< std::vector< JournalSlot >, decode_error > decode_fetch_data_rsp(sisl::io_blob const& blob) {
-    auto const* base = blob.cbytes();
+    uint8_t const* base = blob.cbytes();
     auto const total = static_cast< std::size_t >(blob.size());
 
     if (total < sizeof(fetch_rsp_hdr)) return std::unexpected(decode_error::truncated);
@@ -188,14 +187,15 @@ std::expected< std::vector< JournalSlot >, decode_error > decode_fetch_data_rsp(
         s.all_zeros = d.all_zeros != 0;
 
         if (d.byte_len > 0) {
-            if (data_offset + d.byte_len > total) return std::unexpected(decode_error::malformed);
+            if (auto const remaining = total - data_offset; d.byte_len > remaining)
+                return std::unexpected(decode_error::malformed);
             // Borrow from blob -- caller must keep the backing buffer alive.
             iovec iov{};
             iov.iov_base = const_cast< uint8_t* >(base + data_offset);
-            iov.iov_len = d.byte_len;
+            iov.iov_len = static_cast< std::size_t >(d.byte_len);
             s.data.iovs.push_back(iov);
             s.data.size = d.byte_len;
-            data_offset += d.byte_len;
+            data_offset += static_cast< std::size_t >(d.byte_len);
         }
 
         slots.push_back(std::move(s));

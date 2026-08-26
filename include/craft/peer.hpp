@@ -65,15 +65,13 @@ public:
     virtual ~craft_peer() = default;
 
     // {commit_lsn, last_append_lsn} snapshot -- the leader's commit-lsn poll.
-    virtual async_result< lsn_pair > get_lsns() = 0;
+    // is_login flag is set during the login workflow and the replicas apply
+    // the quesce barrier to fence any further writes in the current term.
     virtual async_result< lsn_pair > get_rs_commit_lsn(uint64_t term, bool is_login) = 0;
 
     // Pull raw journal data for the requested dLSNs. A slot verdicted Empty comes back as
     // JournalSlot{.is_empty=true}; a slot not held by this replica is omitted from the result.
     virtual async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) = 0;
-
-    // Drop every journal entry above lsn.
-    virtual async_status truncate(int64_t lsn) = 0;
 };
 
 // ── Codec: flat byte buffers for peer verb transport ─────────────────────────────────────────────
@@ -88,7 +86,6 @@ enum class decode_error {
     malformed, // counts / offsets are internally inconsistent
 };
 
-// get_rs_commit_lsn -- request: 8-byte term + 1-byte is_login; response: 16 bytes.
 struct get_rs_commit_lsn_req {
     uint64_t term;
     bool is_login;
@@ -103,10 +100,19 @@ std::vector< uint8_t > encode_fetch_data_req(std::vector< int64_t > const& lsns)
 std::expected< std::vector< int64_t >, decode_error > decode_fetch_data_req(std::span< uint8_t const > bytes);
 
 // fetch_data response encode: blobs references slot sg_list data in-place (zero-copy for payload).
-// header owns the descriptor bytes and must outlive the send; slot data must also outlive the send.
+// use blobs() to send the response over the wire; slot data must outlive the send.
 struct fetch_data_rsp_encoded {
-    std::vector< uint8_t > header; // descriptor section -- keep alive until send completes
-    sisl::io_blob_list_t blobs;    // [header blob] + [per-iov slot data blobs]
+    std::vector< uint8_t > header;
+    sisl::io_blob_list_t data_blobs; // per-slot iovs only, no header entry
+
+    // Returns a blob list valid as long as *this is alive and unmodified.
+    sisl::io_blob_list_t blobs() const {
+        sisl::io_blob_list_t out;
+        out.reserve(1 + data_blobs.size());
+        out.emplace_back(const_cast< uint8_t* >(header.data()), static_cast< uint32_t >(header.size()), false);
+        out.insert(out.end(), data_blobs.begin(), data_blobs.end());
+        return out;
+    }
 };
 fetch_data_rsp_encoded encode_fetch_data_rsp(std::vector< JournalSlot > const& slots);
 

@@ -212,12 +212,10 @@ async_result< resolution_result > MemCraftReplica::request_resolution(::io_uring
     co_return net_->run_resolution(this, hdr.term, upto);
 }
 
-async_result< lsn_pair > MemCraftReplica::get_lsns() { co_return do_lsns(); }
 async_result< lsn_pair > MemCraftReplica::get_rs_commit_lsn(uint64_t, bool) { co_return do_lsns(); }
 async_result< std::vector< JournalSlot > > MemCraftReplica::fetch_data(std::vector< int64_t > lsns) {
     co_return do_fetch(lsns);
 }
-async_status MemCraftReplica::truncate(int64_t lsn) { co_return do_truncate(lsn); }
 
 // ── synchronous cores ──
 
