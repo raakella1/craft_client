@@ -24,9 +24,8 @@
 #include <memory>
 #include <vector>
 
-#include <sisl/async/light_task.hpp> // sisl::async::light_result / ::light_status (the co_await-able result carrier)
-#include <sisl/fds/buffer.hpp>       // sisl::sg_list
-#include <sisl/result.hpp>           // sisl::result / ::status / ::ok
+#include <sisl/fds/buffer.hpp> // sisl::sg_list
+#include <sisl/result.hpp>     // sisl::result / ::status / ::ok
 
 #include <craft/types.hpp> // the CRAFT vocabulary + the result / async_result aliases
 
@@ -53,10 +52,6 @@ class craft_replica;
 // pass its ring or tolerate foreign-thread resumption; a blocking consumer (sisl::async::sync_get) is safe
 // either way. (The previous exec::task currency could hop an async consumer back to its own scheduler;
 // nothing in this stack used that, and the on-ring data path is built on NOT doing it.)
-template < typename T >
-using async_result = sisl::async::light_result< T >;
-using async_status = sisl::async::light_status;
-
 // ── construction: the ONE seam ──
 //
 // Build a client over a transport: one backend per member, in membership order (`leader` is where login is tried

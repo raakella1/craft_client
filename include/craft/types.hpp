@@ -17,7 +17,7 @@
 // CRAFT client-facing data types -- the pure-data structs the client API takes and returns. Deliberately
 // engine-free and self-contained (only boost + sisl's ENUM + std): the reference model, the transport, and
 // any consumer (a real HomeStore backend, the ublk driver) share one definition without pulling a storage
-// engine. Internal / peer-only types (CraftPartitionState, JournalSlot) live in craft/replica.hpp.
+// engine. Internal types (CraftPartitionState) live in craft/replica.hpp.
 //
 // peer_id_t is a plain boost uuid here; a consumer that has its own uuid id-type (e.g. homeblocks' node
 // identity) interoperates freely because it is the SAME underlying type.
@@ -27,10 +27,15 @@
 #include <system_error>
 #include <vector>
 
-#include <boost/uuid/uuid.hpp>   // boost::uuids::uuid (== peer_id_t)
-#include <sisl/utility/enum.hpp> // ENUM
+#include <boost/uuid/uuid.hpp>       // boost::uuids::uuid (== peer_id_t)
+#include <sisl/async/light_task.hpp> // sisl::async::light_result / ::light_status
+#include <sisl/utility/enum.hpp>     // ENUM
 
 namespace craft {
+
+template < typename T >
+using async_result = sisl::async::light_result< T >;
+using async_status = sisl::async::light_status;
 
 // A replica's endpoint id (routing / membership). A 16-byte uuid; identical to any consumer's own uuid alias.
 using peer_id_t = boost::uuids::uuid;
