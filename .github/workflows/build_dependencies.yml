@@ -145,6 +145,15 @@ jobs:
         fail_on_cache_miss: true
       if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
 
+    - name: Load NuraftMesg Cache
+      uses: eBay/sisl/.github/actions/load_conan2@dev/v14.x
+      with:
+        testing: 'False'
+        path: import/nuraft_mesg
+        key_prefix: NuMesgDeps-${{ inputs.platform }}-${{ inputs.build-type }}-${{ inputs.malloc-impl }}
+        fail_on_cache_miss: true
+      if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
+
     - name: Retrieve Dependencies
       uses: actions/checkout@v4
       with:
@@ -153,11 +162,23 @@ jobs:
         ref: dev/v14.x
       if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
 
+    - name: Retrieve Dependencies
+      uses: actions/checkout@v4
+      with:
+        repository: eBay/nuraft_mesg
+        path: import/nuraft_mesg
+        ref: dev/v5.x
+      if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
+
     - name: Prepare Recipes
       run: |
         pushd import/sisl
         ./prepare_v2.sh
         conan export --user oss --channel ${{ inputs.conan-channel }} .
+        popd
+        pushd import/nuraft_mesg
+        ./prepare_v2.sh
+        conan export --user oss --channel ${{ inputs.conan-channel }}
         popd
       if: ${{ inputs.testing == 'True' || steps.restore-cache.outputs.cache-hit != 'true' }}
 

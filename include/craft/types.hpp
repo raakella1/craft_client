@@ -17,7 +17,7 @@
 // CRAFT client-facing data types -- the pure-data structs the client API takes and returns. Deliberately
 // engine-free and self-contained (only boost + sisl's ENUM + std): the reference model, the transport, and
 // any consumer (a real HomeStore backend, the ublk driver) share one definition without pulling a storage
-// engine. Internal / peer-only types (CraftPartitionState, JournalSlot) live in craft/replica.hpp.
+// engine. Internal types (CraftPartitionState) live in craft/replica.hpp.
 //
 // peer_id_t is a plain boost uuid here; a consumer that has its own uuid id-type (e.g. homeblocks' node
 // identity) interoperates freely because it is the SAME underlying type.
@@ -27,10 +27,16 @@
 #include <system_error>
 #include <vector>
 
-#include <boost/uuid/uuid.hpp>   // boost::uuids::uuid (== peer_id_t)
-#include <sisl/utility/enum.hpp> // ENUM
+#include <boost/uuid/uuid.hpp>       // boost::uuids::uuid (== peer_id_t)
+#include <sisl/utility/enum.hpp>     // ENUM
+#include <sisl/result.hpp>           // result types
+#include <sisl/async/light_task.hpp> // sisl::async::light_result / ::light_status (the co_await-able result carrier)
 
 namespace craft {
+
+template < typename T >
+using async_result = sisl::async::light_result< T >;
+using async_status = sisl::async::light_status;
 
 // A replica's endpoint id (routing / membership). A 16-byte uuid; identical to any consumer's own uuid alias.
 using peer_id_t = boost::uuids::uuid;
@@ -38,6 +44,13 @@ using peer_id_t = boost::uuids::uuid;
 // The id of the volume/partition a replica set serves. Same 16-byte uuid type; the reference model derives
 // each replica's peer_id_t deterministically from it (mem_replica_id).
 using volume_id_t = boost::uuids::uuid;
+
+template < typename T >
+using async_result = sisl::async::light_result< T >;
+using async_status = sisl::async::light_status;
+
+template < typename T >
+using result = sisl::result< T >;
 
 // Network address of a replica, as returned in login()'s member list.
 struct replica_endpoint {
@@ -64,6 +77,7 @@ struct client_hdr {
     uint64_t term{0};
     int64_t commit_lsn{-1};
     int64_t all_committed_lsn{-1};
+    uint64_t client_token{0};
 };
 
 // Returned by login(): the replica set, the starting dLSN for new I/O, the session term, and the volume
@@ -128,7 +142,9 @@ ENUM(craft_error, uint16_t,
      NO_QUORUM,      // could not reach a quorum of live replicas
      WRONG_TOKEN,    // client_token is not the current owner
      NOT_ELIGIBLE,   // replica cannot serve this read (Missing overlap / below login-dLSN L)
-     REPLICA_DOWN);  // addressed replica is down (fault injection / unreachable)
+     REPLICA_DOWN,   // addressed replica is down (fault injection / unreachable)
+     INTERNAL,       // unexpected internal failure
+     NOT_IMPLEMENTED)
 
 class craft_error_category : public std::error_category {
 public:

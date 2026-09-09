@@ -129,7 +129,7 @@ private:
     // Session-mgr-thread-only state (this proxy's blocking ops all run serially there, so no lock guards these).
     bool ensure_connected(); // lazy connect on first use
     // Lazy HELO for a follower connection (login binds the leader's). nullopt = bound; else why it could not be.
-    std::optional< std::error_condition > ensure_bound(uint64_t term);
+    std::optional< std::error_condition > ensure_bound(uint64_t term, uint64_t client_token);
     // Map a transport fault to the domain error AND, for any connection-level fault (timed out / closed / send
     // / recv), poison this connection so the next op reconnects + re-HELOs. A timed-out recv is still pending
     // in the ring, so the socket cannot be reused as-is; the straggler ack-at-quorum path lands right here.

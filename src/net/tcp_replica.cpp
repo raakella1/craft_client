@@ -19,8 +19,9 @@
 #include <cstring>
 #include <span>
 #include <utility>
-
+#include <fmt/ranges.h>
 #include <chrono>
+#include <boost/uuid/uuid_io.hpp>
 
 #include <sisl/logging/logging.h> // the round-trip summary at shutdown (rt_stat)
 
@@ -87,8 +88,7 @@ net::craft_async_conn* CraftTcpReplica::conn_for(::io_uring* q) {
     std::size_t const n = n_slots_.load(std::memory_order_acquire);
     for (std::size_t i = 0; i < n; ++i) {
         if (slots_[i].ring == q) {
-            assert(slots_[i].owner == std::this_thread::get_id() &&
-                   "a ring must only be passed from its owner thread");
+            assert(slots_[i].owner == std::this_thread::get_id() && "a ring must only be passed from its owner thread");
             return slots_[i].conn.get();
         }
     }
@@ -128,7 +128,8 @@ void CraftTcpReplica::shutdown() {
         if (n == 0) return;
         double const avg_us = static_cast< double >(s.total_ns.load(std::memory_order_relaxed)) / n / 1000.0;
         double const max_us = static_cast< double >(s.max_ns.load(std::memory_order_relaxed)) / 1000.0;
-        LOGINFO("craft_rt {}:{} {:<9} n={:<8} avg={:8.2f}us  max={:9.2f}us", host_, port_, what, n, avg_us, max_us);
+        LOGINFO("[peer_id: {}] craft_rt {}:{} {:<9} n={:<8} avg={:8.2f}us  max={:9.2f}us", boost::uuids::to_string(id_),
+                host_, port_, what, n, avg_us, max_us);
     };
     dump("read", rt_read_);
     dump("write", rt_write_);
@@ -144,10 +145,11 @@ void CraftTcpReplica::shutdown() {
         recv_bytes += c->n_recv_bytes();
     }
     if (replies > 0 && recvs > 0) {
-        LOGINFO("craft_rt {}:{} pump      recvs={} replies={} recvs/reply={:.2f} avg_recv={:.0f}B queues={}", host_,
-                port_, recvs, replies, static_cast< double >(recvs) / static_cast< double >(replies),
-                static_cast< double >(recv_bytes) / static_cast< double >(recvs),
-                n_slots_.load(std::memory_order_relaxed));
+        LOGINFO(
+            "[peer_id: {}] craft_rt {}:{} pump      recvs={} replies={} recvs/reply={:.2f} avg_recv={:.0f}B queues={}",
+            boost::uuids::to_string(id_), host_, port_, recvs, replies,
+            static_cast< double >(recvs) / static_cast< double >(replies),
+            static_cast< double >(recv_bytes) / static_cast< double >(recvs), n_slots_.load(std::memory_order_relaxed));
     }
 #endif
     {
@@ -210,7 +212,7 @@ std::error_condition CraftTcpReplica::on_net_fault(net::net_error e) {
     return net_to_error(e);
 }
 
-std::optional< std::error_condition > CraftTcpReplica::ensure_bound(uint64_t term) {
+std::optional< std::error_condition > CraftTcpReplica::ensure_bound(uint64_t term, uint64_t client_token) {
     if (!ensure_connected()) return make_error_condition(craft_error::REPLICA_DOWN);
     // Re-HELO whenever the requested term differs from what this connection is bound at -- not just on the first
     // IO. A logout+relogin bumps the session term (leader run_login: ++term_), and the wire carries no per-op
@@ -218,7 +220,9 @@ std::optional< std::error_condition > CraftTcpReplica::ensure_bound(uint64_t ter
     // stamp that stale term on every IO and fence it. Binding is idempotent server-side, so re-HELO rebinds
     // this same connection to the new term. (A post-timeout reset drops bound_, so that path re-HELOs too.)
     if (bound_ && term == bound_term_) return std::nullopt;
-    auto h = conn_.helo(vol_id_, /*client_token=*/0, term); // token unused by the server's HELO (auth is P6)
+    LOGDEBUG("[peer_id: {}] sending helo, vol id {}, client token {}, term {}", boost::uuids::to_string(id_),
+             fmt::format("{:02x}", fmt::join(vol_id_, "")), client_token, term);
+    auto h = conn_.helo(vol_id_, client_token, term);
     if (!h) return on_net_fault(h.error());
     if (*h != wire::status::ok) return status_to_error(*h);
     bound_ = true;
@@ -241,6 +245,8 @@ async_result< LoginResult > CraftTcpReplica::login(uint64_t client_token) {
         bound_ = true;
         bound_term_ = r->term;
     }
+    LOGINFO("[peer_id: {}] received login response from the server, client_token {}, max_tx {}, lba_size {}, term {}",
+            boost::uuids::to_string(id_), client_token, max_tx_, lba_, bound_term_);
     LoginResult out;
     out.dLSN = r->dlsn;
     out.term = r->term;
@@ -270,8 +276,7 @@ async_status CraftTcpReplica::logout(client_hdr hdr) {
 }
 
 async_result< lsn_pair > CraftTcpReplica::write(::io_uring* q, client_hdr hdr, int64_t dlsn, uint64_t addr,
-                                                uint64_t len,
-                                                sisl::sg_list data) {
+                                                uint64_t len, sisl::sg_list data) {
     // Serialize the payload NOW, on the CALLER's thread, before the first suspension. This write may be a
     // straggler that keeps running after craft_client acked at quorum and the caller recycled its buffer, so
     // nothing past here may reference `data` (the when_quorum payload contract). This owned copy is the mem
@@ -286,7 +291,7 @@ async_result< lsn_pair > CraftTcpReplica::write(::io_uring* q, client_hdr hdr, i
     }
     // ── on-ring data path: this queue's conn, lazily HELO'd at hdr.term, sends over the caller's ring ──
     if (auto* conn = conn_for(q)) {
-        if (auto e = co_await conn->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+        if (auto e = co_await conn->ensure_ready(vol_id_, hdr.client_token, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
         auto const t0 = std::chrono::steady_clock::now();
         auto r = co_await conn->write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
@@ -298,7 +303,7 @@ async_result< lsn_pair > CraftTcpReplica::write(::io_uring* q, client_hdr hdr, i
 
     auto ev = hop();
     co_await *ev;
-    if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
+    if (auto e = ensure_bound(hdr.term, hdr.client_token)) co_return std::unexpected(*e);
     auto r = conn_.write(dlsn, addr, len, payload, hdr.commit_lsn, hdr.all_committed_lsn);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
     if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
@@ -321,7 +326,7 @@ async_result< read_result > CraftTcpReplica::read(::io_uring* q, client_hdr hdr,
 
     net::read_reply reply;
     if (auto* conn = conn_for(q)) { // ── on-ring data path ──
-        if (auto e = co_await conn->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+        if (auto e = co_await conn->ensure_ready(vol_id_, hdr.client_token, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
         auto const t0 = std::chrono::steady_clock::now();
         auto r = co_await conn->read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
@@ -331,7 +336,7 @@ async_result< read_result > CraftTcpReplica::read(::io_uring* q, client_hdr hdr,
     } else {
         auto ev = hop();
         co_await *ev;
-        if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
+        if (auto e = ensure_bound(hdr.term, hdr.client_token)) co_return std::unexpected(*e);
         auto r = conn_.read(read_lsn, addr, len, d, hdr.commit_lsn, hdr.all_committed_lsn);
         if (!r) co_return std::unexpected(on_net_fault(r.error()));
         reply = std::move(*r);
@@ -352,7 +357,10 @@ async_result< read_result > CraftTcpReplica::read(::io_uring* q, client_hdr hdr,
 
 async_result< lsn_pair > CraftTcpReplica::keep_alive(::io_uring* q, client_hdr hdr) {
     if (auto* conn = conn_for(q)) { // ── on-ring data path ──
-        if (auto e = co_await conn->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+        LOGDEBUG("[PEER_ID: {}] sending ensure ready, vol id {}, client token {}, term {}",
+                 boost::uuids::to_string(id_), fmt::format("{:02x}", fmt::join(vol_id_, "")), hdr.client_token,
+                 hdr.term);
+        if (auto e = co_await conn->ensure_ready(vol_id_, hdr.client_token, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
         auto const t0 = std::chrono::steady_clock::now();
         auto r = co_await conn->keep_alive(hdr.commit_lsn, hdr.all_committed_lsn);
@@ -364,7 +372,7 @@ async_result< lsn_pair > CraftTcpReplica::keep_alive(::io_uring* q, client_hdr h
 
     auto ev = hop();
     co_await *ev;
-    if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
+    if (auto e = ensure_bound(hdr.term, hdr.client_token)) co_return std::unexpected(*e);
     auto r = conn_.keep_alive(hdr.commit_lsn, hdr.all_committed_lsn);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
     if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));
@@ -376,7 +384,7 @@ async_result< resolution_result > CraftTcpReplica::request_resolution(::io_uring
     // must not hop to a blocking round-trip. A round is slow leader work, but the pump demuxes replies by
     // request_id, so the parked leg costs the data ops in flight nothing.
     if (auto* conn = conn_for(q)) {
-        if (auto e = co_await conn->ensure_ready(vol_id_, /*token=*/0, hdr.term); !e)
+        if (auto e = co_await conn->ensure_ready(vol_id_, hdr.client_token, hdr.term); !e)
             co_return std::unexpected(net_to_error(e.error()));
         auto r = co_await conn->resolve(upto, hdr.commit_lsn, hdr.all_committed_lsn);
         if (!r) co_return std::unexpected(net_to_error(r.error()));
@@ -387,7 +395,7 @@ async_result< resolution_result > CraftTcpReplica::request_resolution(::io_uring
     // No-ring tier: the blocking session-mgr path, like login/logout.
     auto ev = hop();
     co_await *ev;
-    if (auto e = ensure_bound(hdr.term)) co_return std::unexpected(*e);
+    if (auto e = ensure_bound(hdr.term, hdr.client_token)) co_return std::unexpected(*e);
     auto r = conn_.resolve(upto, hdr.commit_lsn, hdr.all_committed_lsn);
     if (!r) co_return std::unexpected(on_net_fault(r.error()));
     if (r->status != wire::status::ok) co_return std::unexpected(status_to_error(r->status));

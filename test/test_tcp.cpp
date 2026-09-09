@@ -39,16 +39,16 @@ namespace {
 
 constexpr uint32_t k_lba = 4096;
 
-server_geometry make_geo() {
-    server_geometry geo{};
-    geo.capacity = uint64_t{1} << 30;
-    geo.lba_size = k_lba;
-    geo.max_tx = 512 * 1024;
-    wire::member self{};
-    self.id[0] = 0x01;
+craft::net::server_geometry make_geo() {
+    craft::wire::member self{};
     self.addr = "127.0.0.1:0";
-    geo.members.push_back(self);
-    return geo;
+    self.id[0] = 0x01;
+    return craft::net::server_geometry{
+        .capacity = uint64_t{1} << 30,
+        .lba_size = k_lba,
+        .max_tx = 512 * 1024,
+        .member = std::move(self),
+    };
 }
 
 // A per-byte-nonzero pattern of `n` bytes -- nonzero so no 4 KiB page collapses to a hole on the read path

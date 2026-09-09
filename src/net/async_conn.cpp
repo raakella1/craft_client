@@ -280,13 +280,13 @@ craft_async_conn::ensure_ready(std::array< uint8_t, 16 > const& vol, uint64_t to
         co_return finish(std::unexpected(net_error::malformed));
     }
     if (static_cast< wire::status >(parsed->hdr.status) != wire::status::ok) {
-        LOGDEBUG("craft_async_conn[{}:{}] HELO rejected (status={}) at term={}", host_, port_,
-                 static_cast< int >(parsed->hdr.status), term);
+        LOGDEBUG("craft_async_conn[{}:{}] HELO rejected (status={}) at term={}, client_token={}", host_, port_,
+                 static_cast< int >(parsed->hdr.status), term, token);
         drop_fd(); // HELO rejected: treat as a connection-level fault so the client re-establishes the session
         co_return finish(std::unexpected(net_error::closed));
     }
     ready_ = true;
-    LOGTRACE("craft_async_conn[{}:{}] ready (HELO'd at term={})", host_, port_, term);
+    LOGTRACE("craft_async_conn[{}:{}] ready (HELO'd at term={}, client_token=)", host_, port_, term, token);
     co_return finish(std::expected< void, net_error >{});
 }
 

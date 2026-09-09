@@ -33,8 +33,9 @@
 #include <craft/wire.hpp>
 
 namespace craft {
-class MemCraftReplica; // the server's state backing (pimpl; included only in craft_tcp_server.cpp)
-}
+struct replica_endpoint;
+class RaftReplica; // the server's state backing (pimpl; included only in craft_tcp_server.cpp)
+} // namespace craft
 
 namespace craft::net {
 
@@ -43,12 +44,12 @@ struct server_geometry {
     uint64_t capacity = 0;
     uint32_t lba_size = 0;
     uint32_t max_tx = 0;
-    std::vector< wire::member > members; // members[0] is this replica (its id + addr)
+    wire::member member;
 };
 
 class craft_tcp_server {
 public:
-    explicit craft_tcp_server(server_geometry geo);
+    explicit craft_tcp_server(server_geometry geo, std::string const& server_config_file = {});
     ~craft_tcp_server();
     craft_tcp_server(craft_tcp_server&&) = default;
     craft_tcp_server& operator=(craft_tcp_server&&) = default;
@@ -65,10 +66,10 @@ public:
 
 private:
     server_geometry geo_;
-    std::shared_ptr< MemCraftReplica > replica_; // the real state; driven via its srv_* local-server seam
-    uint64_t next_term_ = 0;                     // monotonic term source; a fresh LOGIN takes ++next_term_
-    uint64_t session_term_ = 0;                  // the current session's term, stamped on every IO
-    bool session_active_ = false;                // false before LOGIN / after LOGOUT -> IO is fenced
+    std::shared_ptr< RaftReplica > replica_; // the real state; driven via its srv_* local-server seam
+    uint64_t next_term_ = 0;                 // monotonic term source; a fresh LOGIN takes ++next_term_
+    uint64_t session_term_ = 0;              // the current session's term, stamped on every IO
+    bool session_active_ = false;            // false before LOGIN / after LOGOUT -> IO is fenced
 
     void on_login(craft_conn&, wire::message const&);
     void on_helo(craft_conn&, wire::message const&);
@@ -77,6 +78,9 @@ private:
     void on_read(craft_conn&, wire::message const&);
     void on_keep_alive(craft_conn&, wire::message const&);
     void on_resolve(craft_conn&, wire::message const&);
+    void on_create_volume(craft_conn&, wire::message const&);
+    void on_get_rs_commit_lsn(craft_conn& conn, wire::message const& req);
+    void on_fetch_data(craft_conn& conn, wire::message const& req);
 };
 
 } // namespace craft::net

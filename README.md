@@ -46,7 +46,7 @@ The client is an **opaque handle + free-function verbs** -- a driver never sees 
 construction seam is separate so the *backend* (not the client) is what varies. The surface is intentionally
 tiny, split by **three disjoint audiences**:
 
-**`include/craft/` is the whole of it -- seven headers.** Everything else (the `craft_replica` interface, the
+**`include/craft/` is the whole of it -- eight headers.** Everything else (the `craft_replica` interface, the
 reference model, the TCP proxy/client/server) lives under `src/` and is not shipped in the package at all:
 
 | Header | Audience | Contents |
@@ -56,6 +56,7 @@ reference model, the TCP proxy/client/server) lives under `src/` and is not ship
 | `craft/tcp.hpp`, `craft/local.hpp` | **drivers**, assembling a binary | backend builders `make_tcp_cluster` / `make_local_cluster` → an **opaque handle**; `backends(handle)` feeds `make_client` |
 | `craft/wire.hpp`, `craft/status.hpp` | **server authors** (the future `CraftConnector`) | the codec + the wire↔`craft_error` bridge |
 | `craft/net/conn.hpp` | **server authors** | the socket + message framing (`recv_message` / `send_all`) a wire server terminates on |
+| `craft/peer.hpp` | **storage backend** | the peer communication interface + methods for serialize/deserialize peer API objects |
 
 `craft_replica` is **opaque even to a driver**: `craft/client.hpp` only forward-declares it, and a driver passes the
 builder's `std::vector<std::shared_ptr<craft_replica>>` straight to `make_client` without ever naming or
