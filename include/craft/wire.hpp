@@ -77,7 +77,14 @@ enum class op : uint8_t {
     //   1. keep the request=odd / response=even convention, and
     //   2. bump k_max_op below -- is_response() is a range check, so a peer op added without it is silently
     //      misclassified as "not a response". That is the trap this constant exists to close.
-    k_max_op = 14, // highest allocated opcode; raise when the peer plane lands
+
+    create_volume = 15, // client-requested volume creation: bootstrap-only
+    create_volume_rsp = 16,
+    get_rs_commit_lsn = 17,
+    get_rs_commit_lsn_rsp = 18,
+    fetch_data = 19,
+    fetch_data_rsp = 20,
+    k_max_op = 20, // highest allocated opcode; raise when the peer plane lands
 };
 
 // Response `status` byte; 1-6 mirror craft_error (craft_types.hpp).
@@ -214,6 +221,49 @@ struct resolve_rsp {
     uint32_t reserved;
 };
 
+// CREATE_VOLUME: leader-only, requests a new volume with the given data-member set.
+// volume_create_req body: member_count x { uint8_t id[16]; uint16_t addr_len; char addr[addr_len]; }
+struct volume_create_req {
+    std::array< uint8_t, 16 > volume_id;
+    uint64_t capacity;
+    uint32_t lba_size;
+    uint32_t member_count; // how many members follow in the body
+};
+// volume_create_rsp: status only (no operation header, no body).
+
+// GetRSCommitLSN: non-RAFT peer query of a replica's {commit_lsn, last_append_lsn}. is_login triggers the
+// quiesce barrier on the responder (see CRAFT Design's Login section).
+struct get_rs_commit_lsn_req {
+    uint64_t term;
+    uint8_t is_login; // bool, but keep POD-packed layout consistent with the rest of this file
+    uint8_t reserved[7];
+};
+struct get_rs_commit_lsn_rsp {
+    int64_t commit_lsn;
+    int64_t last_append_lsn;
+};
+
+// used during login and recovery
+struct fetch_data_req {
+    uint32_t lsn_count;
+    uint32_t reserved;
+}; // body: lsn_count x int64_t
+
+struct fetch_slot_desc {
+    int64_t lsn;         // which dLSN this is
+    uint64_t lba;        // where it writes to
+    uint32_t len;        // how many blocks
+    uint64_t byte_len;   // data bytes size
+    uint8_t is_empty;    // Empty verdict? (no data follows)
+    uint8_t all_zeros;   // zero write? (no data follows)
+    uint8_t reserved[2]; // padding
+};
+struct fetch_data_rsp {
+    uint32_t slot_count; // how many fetch_slot_desc entries are in the body
+    uint32_t reserved;
+};
+// body: slot_count x fetch_slot_desc, THEN the raw data bytes for slots that have real data
+
 #pragma pack(pop)
 
 static_assert(sizeof(msg_hdr) == 8);
@@ -231,7 +281,12 @@ static_assert(sizeof(keepalive_rsp) == 16);
 static_assert(sizeof(logout_req) == 16);
 static_assert(sizeof(resolve_req) == 24);
 static_assert(sizeof(resolve_rsp) == 16);
-
+static_assert(sizeof(volume_create_req) == 32);
+static_assert(sizeof(get_rs_commit_lsn_req) == 16);
+static_assert(sizeof(get_rs_commit_lsn_rsp) == 16);
+static_assert(sizeof(fetch_data_req) == 8);
+static_assert(sizeof(fetch_slot_desc) == 32);
+static_assert(sizeof(fetch_data_rsp) == 8);
 // The fixed operation-header size for an op code (0 for a status-only response). nullopt = unknown op, which
 // is unframeable -- the caller resets the connection.
 std::optional< std::size_t > op_hdr_size(uint8_t op_code) noexcept;

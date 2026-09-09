@@ -57,6 +57,9 @@ struct JournalSlot {
     lba_t lba{0};
     lba_count_t len{0};
     sisl::sg_list data{}; // borrowed when returned by decode_fetch_data_rsp; see buffer contract above
+    // Temporary: owned data is iused to keep data alive during peer comm
+    // This will be removed once we implement a different transport for peer comm in the next PR
+    std::shared_ptr< std::vector< uint8_t > > owned_data{};
 };
 
 // The peer-facing surface of one replica: what a peer may ask of it.

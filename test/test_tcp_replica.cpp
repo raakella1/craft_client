@@ -69,7 +69,8 @@ TEST(CraftTcpReplica, LoginWriteReadLogout) {
         uint64_t const term = lr->term;
 
         auto data = page_of(0xAB);
-        ASSERT_TRUE(rg(proxy.write(nullptr, chdr(term, /*commit=*/0), /*dlsn=*/0, /*addr=*/0, PAGE, one_iov(data))).has_value());
+        ASSERT_TRUE(rg(proxy.write(nullptr, chdr(term, /*commit=*/0), /*dlsn=*/0, /*addr=*/0, PAGE, one_iov(data)))
+                        .has_value());
 
         std::vector< uint8_t > dst(PAGE, 0);
         auto r = rg(proxy.read(nullptr, chdr(term), /*read_lsn=*/0, /*addr=*/0, PAGE, one_iov(dst)));

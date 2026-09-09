@@ -56,6 +56,7 @@ public:
     uint64_t capacity() const { return capacity_; }
     uint32_t max_tx() const { return max_tx_; }
     uint64_t term() const { return term_; }
+    uint64_t client_token() const { return client_token_; }
     int64_t commit_lsn() const { return tracker_->frontier(); }
     int64_t read_horizon() const { return tracker_->read_horizon(); }
     uint64_t winner_scans() const { return tracker_->winner_scans(); }
@@ -89,6 +90,7 @@ private:
     std::vector< std::shared_ptr< craft_replica > > replicas_;
     uint32_t leader_{0};
     uint64_t term_{0};
+    uint64_t client_token_{0};
     uint32_t lba_size_{0};
     uint64_t capacity_{0};
     uint32_t max_tx_{0};
