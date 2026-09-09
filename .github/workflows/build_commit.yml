@@ -28,7 +28,7 @@ jobs:
   # craft_client's only real dependency is sisl (result / async::result / when_quorum + sg_list). Build it
   # into the conan cache first; PR builds skip this job and load the cache the push build stored.
   SislDeps:
-    uses: szmyd/sisl/.github/workflows/build_dependencies.yml@dev/v14.x
+    uses: ebay/sisl/.github/workflows/build_dependencies.yml@dev/v14.x
     with:
       branch: dev/v14.x
       platform: ${{ inputs.platform }}

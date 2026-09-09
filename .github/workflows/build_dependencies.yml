@@ -118,12 +118,12 @@ jobs:
     - name: Retrieve Recipe
       uses: actions/checkout@v4
       with:
-        repository: szmyd/craft_client
+        repository: ebay/craft_client
         ref: ${{ inputs.branch }}
       if: ${{ inputs.testing == 'False' }}
 
     - name: Setup Conan
-      uses: szmyd/sisl/.github/actions/setup_conan2@dev/v14.x
+      uses: ebay/sisl/.github/actions/setup_conan2@dev/v14.x
       with:
         platform: ${{ inputs.platform }}
         compiler: ${{ inputs.compiler }}
@@ -131,13 +131,13 @@ jobs:
 
     - name: Load CraftClient Cache
       id: restore-cache
-      uses: szmyd/sisl/.github/actions/load_conan2@dev/v14.x
+      uses: ebay/sisl/.github/actions/load_conan2@dev/v14.x
       with:
         testing: ${{ inputs.testing }}
         key_prefix: CraftClientDeps-${{ inputs.platform }}-${{ inputs.build-type }}-${{ inputs.malloc-impl }}
 
     - name: Load Sisl Cache
-      uses: szmyd/sisl/.github/actions/load_conan2@dev/v14.x
+      uses: ebay/sisl/.github/actions/load_conan2@dev/v14.x
       with:
         testing: 'False'
         path: import/sisl
@@ -175,7 +175,7 @@ jobs:
       if: ${{ steps.restore-cache.outputs.cache-hit != 'true' }}
 
     - name: Save Conan Cache
-      uses: szmyd/sisl/.github/actions/store_conan2@dev/v14.x
+      uses: ebay/sisl/.github/actions/store_conan2@dev/v14.x
       with:
         key_prefix: CraftClientDeps-${{ inputs.platform }}-${{ inputs.build-type }}-${{ inputs.malloc-impl }}
       if: ${{ github.event_name != 'pull_request' && steps.restore-cache.outputs.cache-hit != 'true' && inputs.tooling != 'Coverage' }}
