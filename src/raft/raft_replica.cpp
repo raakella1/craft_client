@@ -244,14 +244,36 @@ RaftReplica::RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_t
     replica_init(replica_config_path);
     raft_init();
     journal_init();
+
+    // set the watchdog
+    if (!watchdog) {
+        LOGWARN("watchdog is not provided, using default watchdog");
+        watchdog_ = std::make_shared< Watchdog >();
+    } else {
+        watchdog_ = std::move(watchdog);
+    }
 }
 
 RaftReplica::~RaftReplica() = default;
 
 result< lsn_pair > RaftReplica::do_get_rs_commit_lsn(uint64_t term, bool is_login) {
-    // TODO implement quiesce barrier
-    std::lock_guard< std::mutex > g{mu_};
-    return lsn_pair{state_.commit_lsn, state_.last_append_lsn};
+    std::unique_lock< std::mutex > lk{mu_};
+    auto const ret = lsn_pair{state_.commit_lsn, state_.last_append_lsn};
+    if (!is_login) { return ret; }
+    auto const current_term = state_.term;
+    state_.term = term; // quesce ios from older client
+    if (pending_login_timer_) { watchdog_->cancel(*pending_login_timer_); }
+    lk.unlock();
+    auto timer_id = watchdog_->add_oneshot(2 * LoginWaitTime, [this, current_term, term]() {
+        std::lock_guard< std::mutex > g{mu_};
+        if (state_.term == term) {
+            LOGWARN("do_get_rs_commit_lsn: login quiesce timeout -- no InternalLogin committed");
+            state_.term = current_term; // restore the term to the previous value
+        }
+    });
+    lk.lock();
+    pending_login_timer_ = timer_id;
+    return ret;
 }
 
 result< std::vector< JournalSlot > > RaftReplica::srv_fetch_data(std::vector< int64_t > const& lsns) {
@@ -400,8 +422,7 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
         state_.client_token = client_token;
         LOGINFO("apply_login [id={}]: raft disabled, cold-path login OK, term={} token={}",
                 boost::uuids::to_string(ep_.id), term, client_token);
-        return LoginResult{.members = {ep_},
-                           .dLSN = state_.last_append_lsn};
+        return LoginResult{.members = {ep_}, .dLSN = state_.last_append_lsn};
     }
     // Phase 1: collect replica LSN state (non-RAFT broadcast)
     // 1.1: accepted by leader only.
@@ -428,7 +449,7 @@ result< LoginResult > RaftReplica::apply_login(std::array< uint8_t, 16 > const& 
              boost::uuids::to_string(partition_uuid), members.size());
     for (auto const& m : members) {
         if (m.id == ep_.id) { continue; }
-        if (auto r = sisl::async::sync_get(m.peer_client->get_rs_commit_lsn(current_term, true /* is_login */)); r) {
+        if (auto r = sisl::async::sync_get(m.peer_client->get_rs_commit_lsn(term /* send proposed term */, true /* is_login */)); r) {
             LOGDEBUG("apply_login[partition={}]: peer {} reported commit_lsn={} last_append_lsn={}",
                      boost::uuids::to_string(partition_uuid), boost::uuids::to_string(m.id), r->commit_lsn,
                      r->last_append_lsn);
@@ -584,8 +605,16 @@ session_info RaftReplica::srv_session_info(std::array< uint8_t, 16 > const&) con
 }
 
 void RaftReplica::internal_login(InternalLoginMsg m) {
+    {
+        std::lock_guard< std::mutex > g{mu_};
+        state_.client_token = m.client_token;
+        state_.term = m.term;
+        if (pending_login_timer_) {
+            watchdog_->cancel(*pending_login_timer_);
+            pending_login_timer_.reset();
+        }
+    }
     if (m.rs_commit_lsn >= 0) { cold_truncate_above(m.rs_commit_lsn); }
-    cold_apply_login(m.client_token, m.term);
     {
         std::lock_guard< std::mutex > lk(login_mu_);
         login_done_ = true;

@@ -226,7 +226,7 @@ TEST(CraftMemModel, CommitPiggybacksOnWrite) {
     ASSERT_TRUE(rg(r.write(nullptr, chdr(term, /*commit_lsn*/ 0), 1, blk(6), blk(1), one_iov(b1)))
                     .has_value()); // rides commit 0
 
-    auto ls = rg(r.get_lsns());
+    auto ls = rg(r.get_rs_commit_lsn(term, false /*is_login*/));
     ASSERT_TRUE(ls.has_value());
     EXPECT_EQ(ls->commit_lsn, 0); // dLSN 0 applied via the piggyback on the dLSN-1 write
     EXPECT_EQ(ls->last_append_lsn, 1);
@@ -243,13 +243,13 @@ TEST(CraftMemModel, CommitPiggybacksOnRead) {
     auto& r = *g.replicas[0];
     auto buf = page_of(0x33);
     ASSERT_TRUE(rg(r.write(nullptr, chdr(term), 0, blk(5), blk(1), one_iov(buf))).has_value());
-    ASSERT_EQ(rg(r.get_lsns())->commit_lsn, -1); // not committed yet
+    ASSERT_EQ(rg(r.get_rs_commit_lsn(term, false /*is_login*/))->commit_lsn, -1); // not committed yet
 
     auto out = rd(r, term, /*H*/ 0, 5, 1, /*commit_lsn*/ 0); // read advances the frontier to 0
     ASSERT_TRUE(out.ok);
     EXPECT_FALSE(out.layout[0].hole);
     EXPECT_EQ(out.data, buf);
-    EXPECT_EQ(rg(r.get_lsns())->commit_lsn, 0);
+    EXPECT_EQ(rg(r.get_rs_commit_lsn(term, false /*is_login*/))->commit_lsn, 0);
 }
 
 // 10. term fencing on write: an IO whose term != the session term is rejected (the protocol's ETERM).

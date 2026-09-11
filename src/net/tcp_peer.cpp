@@ -28,10 +28,7 @@ std::error_condition net_to_error(net_error e) {
 } // namespace
 
 CraftTcpPeer::CraftTcpPeer(std::string host, uint16_t port, peer_id_t id, std::chrono::milliseconds op_timeout) :
-        host_{std::move(host)},
-        port_{port},
-        id_{id},
-        op_timeout_{op_timeout} {}
+        host_{std::move(host)}, port_{port}, id_{id}, op_timeout_{op_timeout} {}
 
 CraftTcpPeer::~CraftTcpPeer() = default;
 
@@ -149,9 +146,5 @@ async_result< std::vector< JournalSlot > > CraftTcpPeer::fetch_data(std::vector<
 
     co_return out_slots;
 }
-
-// ── existing craft_peer methods: not yet implemented over the wire (no opcodes allocated for these yet) ──
-async_result< lsn_pair > CraftTcpPeer::get_lsns() { co_return fail(craft_error::NOT_IMPLEMENTED); }
-async_status CraftTcpPeer::truncate(int64_t lsn) { co_return fail(craft_error::NOT_IMPLEMENTED); }
 
 } // namespace craft::net

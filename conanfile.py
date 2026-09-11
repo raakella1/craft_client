@@ -10,7 +10,7 @@ required_conan_version = ">=1.60.0"
 
 class CraftClientConan(ConanFile):
     name = "craft_client"
-    version = "0.4.7"
+    version = "0.4.1"
 
     description = (
         "CRAFT reference client + wire protocol -- transport-agnostic, HomeStore-free"

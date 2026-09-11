@@ -60,7 +60,7 @@ SISL_OPTION_GROUP(craft_srv,
 
 #define SRV_OPTIONS logging, craft_srv
 SISL_OPTIONS_ENABLE(SRV_OPTIONS)
-SISL_LOGGING_DEF(craft)  // DEFINE the module (INIT alone only references it -> "undefined symbol module_level_craft")
+SISL_LOGGING_DEF(craft) // DEFINE the module (INIT alone only references it -> "undefined symbol module_level_craft")
 SISL_LOGGING_INIT(craft, nuraft_mesg, grpc_server) // register it for level control
 
 namespace {
@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
     // sigaction WITHOUT SA_RESTART: glibc's signal() sets SA_RESTART, which auto-restarts the blocking accept()
     // after the handler runs, so the loop would never re-check g_stop and Ctrl-C could not stop the server. With
     // the flag cleared, accept() returns EINTR on the signal and the loop breaks.
-    struct sigaction sa{};
+    struct sigaction sa {};
     sa.sa_handler = on_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;

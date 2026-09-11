@@ -6,7 +6,7 @@ transport yet."
 
 |  | **Client plane** | **Peer plane** |
 |---|---|---|
-| Interface | `craft_replica` (`src/craft_replica.hpp`) | `craft_peer` (`src/craft_peer.hpp`) |
+| Interface | `craft_replica` (`src/craft_replica.hpp`) | `craft_peer` (`include/craft/peer.hpp`) |
 | Caller | `craft_client` -- the IO client | **a replica**, applying a RAFT entry |
 | Callee | a member | another member (a *holder*) |
 | Trigger | user IO | committing `SyncRSCommitLSN` / `InternalLogin` |

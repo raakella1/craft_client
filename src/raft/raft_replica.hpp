@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "mem/replica.hpp"
+#include "watchdog.hpp"
 
 namespace craft {
 
@@ -42,7 +43,7 @@ struct InternalLoginMsg;
 
 class RaftReplica final : public MemCraftReplica {
 public:
-    RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx, std::string const& replica_config_path,
+    RaftReplica(replica_endpoint ep, uint32_t page_size, uint32_t max_tx, std::string const& replica_config_path, std::shared_ptr< Watchdog > watchdog = nullptr,
                 std::weak_ptr< registry_manager > registry_mgr, bool init_raft_service = false);
 
     ~RaftReplica();
@@ -54,6 +55,7 @@ public:
 
     result< void > srv_create_partition(std::array< uint8_t, 16 > const& partition_id,
                                         std::vector< replica_endpoint > const& members);
+
     result< lsn_pair > srv_get_rs_commit_lsn(uint64_t term, bool is_login) {
         return do_get_rs_commit_lsn(term, is_login);
     }
@@ -77,12 +79,14 @@ private:
     void journal_init();
 
     uint32_t max_tx_;
+    std::atomic< int64_t > rs_commit_lsn_{-1};
     std::mutex login_mu_;
     std::condition_variable login_cv_;
     bool login_done_{false};
     
     class RaftCommitWorker;
     std::unique_ptr< RaftCommitWorker > commit_worker_;
+    std::optional< Watchdog::TimerId > pending_login_timer_;
     std::weak_ptr< registry_manager > registry_mgr_;
     std::shared_ptr< raft_service > raft_service_;
 };

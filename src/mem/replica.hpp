@@ -43,6 +43,7 @@ namespace craft {
 
 class MemTransport; // in-process network + cold path
 class RaftReplica;  // raft based replica server
+class Watchdog;     // the keepalive and login watchdog
 
 using sisl::ok;
 template < typename T >
@@ -168,10 +169,8 @@ public:
     // NOTE these are not yet reached THROUGH craft_peer: MemTransport's cold path (run_login / run_resolution) is
     // a friend and drives the cold_* / peek_* helpers below directly. Routing it through this interface is step
     // one of making the peer plane real; step two is allocating its opcodes (wire::op stops at 14).
-    async_result< lsn_pair > get_lsns() override;
     async_result< lsn_pair > get_rs_commit_lsn(uint64_t term, bool is_login) override;
     async_result< std::vector< JournalSlot > > fetch_data(std::vector< int64_t > lsns) override;
-    async_status truncate(int64_t lsn) override;
 
     peer_id_t id() const override { return ep_.id; } // craft_replica
 
@@ -266,7 +265,6 @@ private:
     lsn_pair peek_lsns();
     void cold_apply_sync(int64_t rs_commit_lsn, uint64_t client_token);
     void cold_apply_logout();
-    
 
     // resolution-round hooks used by MemTransport::run_resolution (each takes mu_). A fetched copy shares the
     // holder's bytes buffer (immutable once appended), so a fill copies no payload.
@@ -304,6 +302,7 @@ protected:
     std::shared_ptr< journal_t > journal_; // dLSN -> slot (out-of-order arrival tolerated)
     std::shared_ptr< index_t > index_;     // applied prefix (<= commit_lsn); an absent LBA is a hole
     mutable std::mutex mu_;
+    std::shared_ptr< Watchdog > watchdog_; // the keepalive and login watchdog
 };
 
 } // namespace craft
